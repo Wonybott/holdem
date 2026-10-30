@@ -6,7 +6,7 @@ Python 3.12 / PySide6 Windows 데스크톱 개발 버전입니다. 자체 모의
 
 **처음 사용하는 분:** [다운로드부터 실행·실제 화면 설정까지 한국어 안내](docs/START_HERE_KO.md).
 
-Windows에서 Python 3.12를 설치하고 ZIP을 풀어 **run_windows.bat**를 더블클릭하세요. 직접 실행하려면 프로젝트 폴더의 PowerShell에서 다음을 사용합니다.
+Windows에서 [Python 3.12 64비트](https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe)를 설치하고 ZIP을 풀어 **run_windows.bat**를 더블클릭하세요. **Python 3.14만 설치된 경우 3.12를 추가 설치하세요.** 3.14를 삭제할 필요는 없습니다. 현재 고정된 GUI 패키지는 3.14와 호환되지 않습니다. 직접 실행하려면 프로젝트 폴더의 PowerShell에서 다음을 사용합니다.
 
 ```powershell
 py -3.12 -m venv .venv
