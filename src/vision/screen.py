@@ -109,10 +109,16 @@ class TesseractNumbers:
         if image is None or image.size == 0:
             return None, 0.0
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        if gray.shape[0]<60:
+            scale=60/gray.shape[0]
+            gray=cv2.resize(gray,None,fx=scale,fy=scale,interpolation=cv2.INTER_CUBIC)
         if float(np.median(gray)) < 127:
             gray = 255-gray
         outputs=[]
         for scale in (1,2):
+            if getattr(self,'cancel',None) is not None and self.cancel.is_set():
+                from src.poker.equity import Cancelled
+                raise Cancelled()
             variant=cv2.resize(gray,None,fx=scale,fy=scale,interpolation=cv2.INTER_CUBIC)
             variant=cv2.copyMakeBorder(variant,12,12,12,12,cv2.BORDER_CONSTANT,value=255)
             value,confidence=self._read_variant(variant)

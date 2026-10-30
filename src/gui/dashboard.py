@@ -71,6 +71,7 @@ class Dashboard(QWidget):
         cards.addWidget(self.hero,2); cards.addWidget(self.board,5); layout.addLayout(cards)
         self.context=QLabel('카드와 금액을 읽으면 여기에 표시합니다.'); self.context.setObjectName('muted')
         self.context.setWordWrap(True); layout.addWidget(self.context)
+        self.seat_hint=QLabel('');self.seat_hint.setWordWrap(True);self.seat_hint.setObjectName('muted');layout.addWidget(self.seat_hint)
         grid=QGridLayout(); grid.setSpacing(10)
         self.equity=Metric('내 예상 팟 지분')
         self.required=Metric('콜에 필요한 지분')
@@ -119,7 +120,7 @@ class Dashboard(QWidget):
         self.context.setText(f'{source} · {streets[state.street]} · 상대 {state.opponents}명 · 위치 {state.position}'
                              f' · 팟 {state.pot:g}칩 · 콜 {call_text} · 내 스택 {state.stacks[0]:g}칩')
         self.equity.set(f'{result.equity:.1%}',f'단독 승리 {result.win:.1%} · 무승부 {result.tie:.1%}')
-        if state.to_call is None:
+        if state.to_call is None or state.paused:
             self.required.set('—','콜 금액 확인 필요')
             self.ev.caption.setText('행동 EV')
             self.ev.set('—','콜 금액이 없어 계산 보류')
@@ -128,7 +129,7 @@ class Dashboard(QWidget):
             self.ev.caption.setText('콜 EV · 쇼다운 가정' if state.to_call else '체크 EV · 쇼다운 가정')
             self.ev.set(f'{call_ev(result.equity,state.pot,state.to_call):+.1f}칩',f'상대 범위: {ranges}')
         self.freshness.setText('수동 입력 결과' if source=='수동 입력' else '방금 갱신')
-        if state.to_call is None or state.hero_turn is not True:
+        if state.to_call is None or state.hero_turn is not True or state.paused:
             self.scenario_label.setText('내 차례와 콜 금액이 확인되면 행동·금액을 다시 분석합니다.')
             self.scenarios.hide()
         elif state.to_call:

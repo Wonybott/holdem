@@ -6,6 +6,7 @@ import subprocess
 import cv2
 import numpy as np
 from src.vision.screen import TesseractNumbers
+from src.vision.rank_templates import MASKS as RANK_MASKS
 
 
 @dataclass(frozen=True)
@@ -36,8 +37,12 @@ class TesseractReader:
     def __init__(self, executable=None):
         self.executable=TesseractNumbers(executable).executable
         self.cache={}
+        self.cancel=None
 
     def words(self,image,psm=11,whitelist=None):
+        if self.cancel is not None and self.cancel.is_set():
+            from src.poker.equity import Cancelled
+            raise Cancelled()
         ok,data=cv2.imencode('.png',image)
         if not ok: return []
         cmd=[self.executable,'stdin','stdout','--psm',str(psm),'-l','eng']
@@ -64,23 +69,40 @@ class TesseractReader:
         scale=90/h
         ink=cv2.resize(mask.astype(np.uint8)*255,(max(8,round(w*scale)),90),interpolation=cv2.INTER_NEAREST)
         image=cv2.copyMakeBorder(255-ink,25,25,25,25,cv2.BORDER_CONSTANT,value=255)
+        normalized=cv2.resize(mask.astype(np.uint8),(32,40),interpolation=cv2.INTER_NEAREST)>0
+        shape=[]
+        for label,templates in RANK_MASKS.items():
+            scores=[]
+            for raw in templates:
+                template=np.unpackbits(np.frombuffer(bytes.fromhex(raw),np.uint8)).reshape(40,32)>0
+                union=(normalized|template).sum()
+                scores.append(float((normalized&template).sum()/union) if union else 0)
+            shape.append((max(scores),label))
+        shape.sort(reverse=True)
+        strong=shape[0][0]>=.86 and shape[0][0]-shape[1][0]>.10
         votes={}
         result=(None,0)
         for angle in (0,8,-8):
             matrix=cv2.getRotationMatrix2D((image.shape[1]/2,image.shape[0]/2),angle,1)
             rotated=cv2.warpAffine(image,matrix,(image.shape[1],image.shape[0]),borderValue=255)
             current=[]
-            for psm in (6,13):
+            for psm in (6,13,10):
                 words=self.words(rotated,psm,'23456789TJQKA10')
                 if len(words)!=1:continue
                 word=words[0];label='T' if word.text=='10' else word.text
                 if len(label)!=1 or label not in '23456789TJQKA' or word.confidence<.75:continue
                 current.append((label,word.confidence))
                 votes.setdefault(label,[]).append(word.confidence)
-            if angle==0 and len(current)==2 and current[0][0]==current[1][0]:
-                result=(current[0][0],min(v for _,v in current))
-                break
-        if result[0] is None:
+            labels={label for label,_ in current}
+            if angle==0 and len(current)>=2 and len(labels)==1:
+                candidate=current[0][0]
+                if not strong or candidate==shape[0][1]:
+                    result=(candidate,min(v for _,v in current));break
+        if strong and shape[0][1] in votes:
+            result=(shape[0][1],min(shape[0][0],max(votes[shape[0][1]])))
+        elif strong and result[0] is not None and result[0]!=shape[0][1]:
+            result=(None,0)
+        if result[0] is None and not strong:
             accepted=sorted(((len(values),min(values),label) for label,values in votes.items() if len(values)>=2),reverse=True)
             if accepted and (len(accepted)==1 or accepted[0][0]>accepted[1][0]):
                 result=(accepted[0][2],accepted[0][1])

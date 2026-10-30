@@ -89,3 +89,8 @@ def test_uncertain_amount_invalidates_state():
     o=MockRecognizer().analyze(frame)
     assert o.state is None
     assert any('pot' in e for e in o.errors)
+
+
+def test_ten_seat_mock_round_trip():
+    state=GameState(opponents=9,stacks=(1000,)*10)
+    assert MockRecognizer().analyze(render(state)).state==state

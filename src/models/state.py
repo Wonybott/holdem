@@ -1,6 +1,7 @@
 """Validated immutable domain objects. Money is in arbitrary table chip units."""
 from dataclasses import dataclass
 from math import isfinite
+from src.models.table import Seat
 
 RANKS = "23456789TJQKA"
 SUITS = "shdc"
@@ -36,13 +37,16 @@ class GameState:
     position: str = "BTN"
     history: tuple[Action, ...] = ()
     hero_turn: bool | None = True
+    seats: tuple[Seat,...] = ()
+    settled_pot: float | None = None
+    paused: bool = False
 
     def __post_init__(self):
         validate_cards(self.hole + self.board)
         if len(self.hole) != 2 or len(self.board) not in (0, 3, 4, 5):
             raise ValueError("홀 카드 2장, 보드는 0/3/4/5장이어야 합니다.")
-        if not isinstance(self.opponents, int) or not 1 <= self.opponents <= 8:
-            raise ValueError("상대 수는 1~8명이어야 합니다.")
+        if not isinstance(self.opponents, int) or not 1 <= self.opponents <= 9:
+            raise ValueError("상대 수는 1~9명이어야 합니다.")
         if len(self.stacks) != self.opponents + 1:
             raise ValueError("스택은 나, 상대 순으로 상대 수+1개 입력하세요.")
         money = (self.pot, *self.stacks) + (() if self.to_call is None else (self.to_call,))

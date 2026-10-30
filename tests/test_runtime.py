@@ -62,6 +62,7 @@ def test_gui_responsive_during_real_mc_and_manual(app):
     timer=QTimer(); timer.setInterval(15); timer.timeout.connect(lambda:ticks.append(time.monotonic()))
     window.iterations.setValue(50000)
     window.show()
+    app.processEvents()  # Warm initial font/layout work before measuring MC responsiveness.
     try:
         timer.start()
         window.analyze_manual()

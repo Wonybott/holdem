@@ -9,3 +9,10 @@
 `dashboard_example.png`는 새 플레이 화면을 자체 모의 데이터로 렌더링한 UI 예시입니다. 인식 테스트 fixture나 실제 PokerNow 화면이 아닙니다.
 
 `pokernow_layout_demo.png`는 자동 탐지 검사에 쓰는 **자체 생성 이미지**입니다. 사용자가 올린 사진/실제 사이트 캡처를 재배포한 것이 아닙니다. `python -m src.main --analyze assets/pokernow_layout_demo.png --pokernow`로 보정 없이 카드·팟·스택을 판독할 수 있습니다. `automatic_dashboard_example.png`는 같은 검증 상태를 자동 인식 화면에 표시한 UI 예시입니다.
+
+
+0.5 추가 예시도 모두 자체 생성한 이미지이며 사용자 사진/실제 사이트 캡처가 아닙니다.
+
+- `full_browser_demo.png`: 3839×1599 전체 브라우저 형태, 왼쪽 내 자리와 3명 참가자, 상대 베팅 4000 / total 8000. `python -m src.main --analyze assets/full_browser_demo.png --pokernow`로 분석할 수 있습니다.
+- `full_browser_paused_demo.png`: 동일한 전체 화면에 일시정지 배너, 회색 카드 뒷면, OFFLINE 상대, As/5h/2s/5s와 8h/2d를 표시합니다.
+- `seats_dashboard_example.png`: `full_browser_demo.png`를 실제 인식기로 읽은 결과를 Qt offscreen에서 좌석·베팅 탭에 표시한 예시입니다. 읽히지 않은 번호와 미확인 값은 그대로 남깁니다.

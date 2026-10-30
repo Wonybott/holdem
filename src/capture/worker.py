@@ -70,6 +70,7 @@ class AnalysisWorker(QThread):
                     image, source_revision = self.source.grab()
                     frame_key = (hashlib.sha256(recognizer.signature(image) if hasattr(recognizer, 'signature') else image.tobytes()).digest(), source_revision, revision)
                     if frame_key != last_frame_key or getattr(recognizer,'always_analyze',False):
+                        if hasattr(recognizer,'set_cancel'):recognizer.set_cancel(self.stop_event)
                         cached = recognizer.analyze(image)
                         frame_key = (hashlib.sha256(recognizer.signature(image) if hasattr(recognizer,'signature') else image.tobytes()).digest(),source_revision,revision)
                         last_frame_key = frame_key
@@ -77,7 +78,9 @@ class AnalysisWorker(QThread):
                     state = stable.update(cached.state)
                     if state is None:
                         last_key = None
-                        self.status.emit("인식 실패 / 갱신 필요" if cached.errors else "안정화 중 (2프레임)")
+                        if cached.table is not None and cached.table.phase in ('waiting','paused'):
+                            self.status.emit('플레이어 / 딜 대기 중' if cached.table.phase=='waiting' else '게임 일시정지')
+                        else:self.status.emit("인식 실패 / 갱신 필요" if cached.errors else "안정화 중 (2프레임)")
                 else:
                     state = manual
                     source_revision = self.source.snapshot()[-1]
@@ -122,3 +125,4 @@ class AnalysisWorker(QThread):
                 self.status.emit(f"갱신 필요: {exc}")
             # Wait is interruptible. No queued frames, busy loop or overlapping MC jobs.
             self.stop_event.wait(max(.01, interval - (time.monotonic() - started)))
+        if hasattr(self.recognizer,'set_cancel'):self.recognizer.set_cancel(None)

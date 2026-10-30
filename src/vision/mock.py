@@ -7,7 +7,7 @@ WIDTH, HEIGHT = 960, 640
 CARD_W, CARD_H = 70, 90
 CARD_SLOTS = [(40, 110), (120, 110)] + [(300 + i*80, 110) for i in range(5)]
 FIELDS = {"pot": (180, 250), "to_call": (180, 290), "opponents": (180, 330),
-          "position": (180, 370), **{f"stack{i}": (650, 250+i*36) for i in range(9)}}
+          "position": (180, 370), **{f"stack{i}": (650, 250+i*36) for i in range(10)}}
 GLYPHS = " 0123456789.BTNUSMPKOWCG"
 CELL_W, CELL_H, CELLS = 20, 28, 12
 

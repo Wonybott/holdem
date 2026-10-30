@@ -101,6 +101,7 @@ def test_inactive_preaction_check_does_not_mean_call_zero():
 def test_call_requires_numeric_confirmation():
     table=Box(300,100,1200,650);image=np.zeros((1100,2000,3),np.uint8)
     words=[Word(t,.99,Box(x,1000,60,25)) for t,x in [('CALL',1500),('2000',1570),('FOLD',1800)]]
+    image[1000:1025,1500:1860]=(40,180,70)
     assert PokerNowRecognizer.read_action(image,words,table,True,lambda *_:(2001,.99))[0] is None
     assert PokerNowRecognizer.read_action(image,words,table,True,lambda *_:(2000,.99))[0]==2000
 
@@ -179,3 +180,24 @@ def test_live_worker_updates_turn_without_manual_regions(app,automatic):
         assert outputs[-1][1]==first_equity
     finally:
         worker.stop();assert worker.wait(5000)
+
+
+def test_disabled_check_does_not_override_enabled_call():
+    table=Box(300,100,1200,650);image=np.zeros((1100,2000,3),np.uint8)
+    words=[Word(t,.99,Box(x,1000,60,25)) for t,x in [('CALL',1500),('4000',1570),('RAISE',1650),('CHECK',1720),('FOLD',1800)]]
+    image[1000:1025,1500:1710]=(40,180,70)
+    image[1000:1025,1800:1860]=(30,80,200)
+    image[1000:1025,1720:1780]=(15,35,20)
+    assert PokerNowRecognizer.read_action(image,words,table,True,lambda *_:(4000,.99))[0]==4000
+
+
+def test_stop_cancels_ocr_before_starting_subprocess(monkeypatch):
+    from threading import Event
+    import subprocess
+    event=Event();event.set()
+    class Blocked(TesseractReader):
+        def __init__(self):self.cancel=event
+    def unexpected(*args,**kwargs):raise AssertionError('OCR should not start')
+    monkeypatch.setattr(subprocess,'run',unexpected)
+    from src.poker.equity import Cancelled
+    with pytest.raises(Cancelled):Blocked().words(np.zeros((40,100,3),np.uint8))

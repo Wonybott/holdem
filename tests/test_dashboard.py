@@ -118,3 +118,22 @@ def test_unknown_call_does_not_show_check_or_zero_cost(app):
         window.stop_capture()
         assert not window.mini.cards.text()
     finally:window.close()
+
+
+def test_lobby_and_paused_scenes_show_seats_without_action(app):
+    from src.models.table import Seat,TableSnapshot
+    window=MainWindow()
+    try:
+        seats=(Seat('s',.7,1,occupied=True,name='hero',stack=100000),Seat('e',.3,0,number=6,occupied=False))
+        waiting=TableSnapshot(seats,'waiting',settled_pot=0,total_pot=0)
+        window.on_observed(Observation(table=waiting),window.source.revision)
+        assert window.dashboard.title.text()=='플레이어 / 딜 대기 중'
+        assert window.seat_view.rows.rowCount()==2
+        assert not window.dashboard.amount.text()
+        paused=TableSnapshot(seats,'paused',settled_pot=4000,total_pot=4000)
+        window.on_observed(Observation(table=paused,errors=['hidden cards']),window.source.revision)
+        window.on_status('인식 실패 / 갱신 필요')
+        assert window.dashboard.title.text()=='게임 일시정지'
+        assert window.mini.title.text()=='게임 일시정지'
+        assert window.dashboard.ev.value.text()=='—'
+    finally:window.close()

@@ -16,6 +16,8 @@ class Guidance:
 
 
 def explain_decision(state: GameState, result: EquityResult) -> Guidance:
+    if state.paused:
+        return Guidance('paused','게임 일시정지','방장이 게임을 재개할 때까지 기다리세요. 이전 체크 말풍선으로 현재 행동을 결정하지 않습니다.','','neutral','현재 보이는 카드의 팟 지분만 참고하세요.')
     if state.hero_turn is False:
         return Guidance('wait','상대 차례입니다','승률을 확인하며 내 차례를 기다리세요. 현재 콜·베팅 금액은 추천하지 않습니다.','','neutral','차례가 바뀌면 자동으로 다시 분석합니다.')
     if state.hero_turn is None:

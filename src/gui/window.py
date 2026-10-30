@@ -18,13 +18,14 @@ from src.gui.mock_window import MockWindow
 from src.gui.dashboard import Dashboard
 from src.gui.theme import STYLE
 from src.gui.mini import MiniWindow
+from src.gui.seat_view import SeatView
 from src.strategy.scenarios import pot_odds, call_ev, bet_scenarios
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Texas Hold'em Vision Analyzer")
+        self.setWindowTitle("Texas Hold'em Vision Analyzer · 0.5.0")
         self.resize(940, 940)
         self.setMinimumSize(720, 650)
         self.source = MockSource()
@@ -48,6 +49,7 @@ class MainWindow(QMainWindow):
         self.mini.stop.connect(self.stop_capture)
         self.next_step = 'start'
         self.recognition_errors = []
+        self.last_table = None
         root = QWidget()
         layout = QVBoxLayout(root)
         layout.setContentsMargins(20, 16, 20, 16)
@@ -76,6 +78,7 @@ class MainWindow(QMainWindow):
         self.dashboard.next_button.clicked.connect(self.perform_next_step)
         self.play_page.setWidget(self.dashboard)
         self.tabs.addTab(self.play_page, '플레이 보기')
+        self.seat_view=SeatView();self.tabs.addTab(self.seat_view,'좌석·베팅')
         layout.addWidget(self.tabs, 1)
         self.setCentralWidget(root)
 
@@ -130,6 +133,8 @@ class MainWindow(QMainWindow):
         self.ranges = QLineEdit('random')
         self.ranges.setPlaceholderText('random 또는 AA,AKs / 상대별 구분 ;')
         form.addRow('상대 범위', self.ranges)
+        self.hero_name=QLineEdit();self.hero_name.setPlaceholderText('선택 사항: 여러 공개 카드 쌍이 있으면 입력')
+        form.addRow('내 닉네임 (좌석 식별용)',self.hero_name)
         self.button(form, '분석 설정 적용', self.apply_settings)
         settings_layout.addWidget(analysis_group)
         display_group = QGroupBox('표시 옵션')
@@ -150,7 +155,7 @@ class MainWindow(QMainWindow):
         self.hole = QLineEdit('As Kh'); self.board = QLineEdit('Qs Jh 2c')
         self.pot = QLineEdit('120'); self.call = QLineEdit('20')
         self.stacks = QLineEdit('1000 1000 1000')
-        self.opponents = QSpinBox(); self.opponents.setRange(1,8); self.opponents.setValue(2)
+        self.opponents = QSpinBox(); self.opponents.setRange(1,9); self.opponents.setValue(2)
         self.position = QComboBox(); self.position.addItems(POSITIONS); self.position.setCurrentText('BTN')
         for text, widget in (('홀 카드',self.hole),('보드 (프리플롭은 비움)',self.board),
                              ('팟 (내 콜 이전, 상대 베팅 포함)',self.pot),('내 유효 콜 금액',self.call),
@@ -197,11 +202,18 @@ class MainWindow(QMainWindow):
         self.result_state = None
         self.output.clear()
         self.dashboard.clear()
+        if self.last_table is None:self.dashboard.seat_hint.clear()
         self.status_label.setText(message)
         self.next_step = 'settings'
         self.dashboard.next_button.setText('화면 설정 열기')
         self.dashboard.next_button.show()
-        if self.is_live() and not self.is_auto() and self.profile is None and not self.manual_mode:
+        if self.last_table is not None and self.last_table.phase=='paused':
+            self.dashboard.message('게임 일시정지','방장이 게임을 재개할 때까지 기다리세요. 체크 말풍선은 이전 행동 표시입니다.',badge='일시정지')
+            self.dashboard.next_button.hide()
+        elif self.last_table is not None and self.last_table.phase=='waiting':
+            self.dashboard.message('플레이어 / 딜 대기 중','좌석·베팅 탭에서 앉은 사람과 빈 자리를 확인할 수 있습니다.',badge='대기 중')
+            self.dashboard.next_button.hide()
+        elif self.is_live() and not self.is_auto() and self.profile is None and not self.manual_mode:
             self.dashboard.message('먼저 화면을 설정하세요',
                                    '화면 설정에서 저장된 보정을 불러오거나, 실제 테이블의 카드·팟·콜 영역을 지정하세요.',
                                    'caution','설정 필요')
@@ -240,6 +252,9 @@ class MainWindow(QMainWindow):
         else:
             self.dashboard.message('확인이 필요합니다',message,'caution')
         self.mini.clear(self.dashboard.title.text(),self.dashboard.instruction.text())
+        if self.last_table is not None and self.last_table.phase=='waiting':
+            seats=self.last_table.seats
+            self.mini.cards.setText(f'확인된 플레이어 {sum(s.occupied is True for s in seats)}명 / 빈 자리 {sum(s.occupied is False for s in seats)}개')
 
     def show_mini(self):
         geometry=self.screen().availableGeometry()
@@ -264,11 +279,12 @@ class MainWindow(QMainWindow):
     def settings(self, manual=None):
         recognizer=None
         if manual is None:
-            if self.is_auto():recognizer=PokerNowRecognizer()
+            if self.is_auto():recognizer=PokerNowRecognizer(hero_name=self.hero_name.text())
             elif self.is_live() and self.profile is not None:recognizer=ScreenRecognizer(self.profile)
         self.accepted_revision = self.worker.configure(self.interval.value(),self.iterations.value(),
                                                        self.ranges.text(),manual,recognizer)
         self.manual_mode=manual is not None
+        self.last_table=None;self.seat_view.set_snapshot(None)
         self.last_seen=0
         self.invalidate('계산 준비 / 갱신 필요')
 
@@ -306,6 +322,9 @@ class MainWindow(QMainWindow):
 
     def stop_capture(self):
         self.worker.stop()
+        self.last_table=None
+        self.seat_view.set_snapshot(None)
+        self.dashboard.seat_hint.clear()
         self.manual_mode = False
         self.invalidate("중지됨 / 갱신 필요")
         # Never wait synchronously on the UI thread. Restart is available after finish.
@@ -393,6 +412,13 @@ class MainWindow(QMainWindow):
         if self.worker.stop_event.is_set() or self.manual_mode or source_revision != self.source.snapshot()[-1]:
             return
         self.last_state = observation.state
+        self.last_table=observation.table
+        self.seat_view.set_snapshot(observation.table)
+        if observation.table is not None:
+            seats=observation.table.seats;occupied=[s for s in seats if s.occupied is True]
+            betters=[f'{s.name or s.slot_id}: {s.bet:g}' for s in occupied if s.bet is not None]
+            self.dashboard.seat_hint.setText(f'확인된 플레이어 {len(occupied)}명 · 현재 베팅 '+(' / '.join(betters[:3]) or '표시 미확인')+' · 상세는 좌석·베팅 탭')
+        else:self.dashboard.seat_hint.clear()
         self.last_seen = time.monotonic()
         if observation.state is None:
             self.recognition_errors = observation.errors
@@ -409,6 +435,8 @@ class MainWindow(QMainWindow):
     def on_status(self, text):
         if self.worker.stop_event.is_set():
             return
+        if text.startswith('갱신 필요:'):
+            self.last_table=None;self.seat_view.set_snapshot(None)
         self.status_label.setText(text)
         if "갱신 필요" in text or '안정화' in text:
             self.invalidate(text)
@@ -437,9 +465,11 @@ class MainWindow(QMainWindow):
             for b in bet_scenarios(s.pot,min(s.stacks)):
                 lines.append(f'팟 {b.fraction:.0%}: {b.amount:g}칩 / 순수 블러프 손익분기 전체 폴드 {b.pure_bluff_break_even:.1%} / EV 미상')
         lines += ['사이드 팟·레이크·미래 베팅 미반영. 상대 범위 가정에 민감합니다.',
-                  '이전 행동 이력 미지원. 내 차례와 활성 버튼이 확인될 때만 행동을 검토합니다.']
+                  '이력은 캡처 이후 관측한 말풍선/표시 베팅입니다. 완전한 게임 로그가 아닙니다.']
         if self.is_live() and not self.is_auto() and not self.manual_mode:
             lines.append('직접 보정 모드의 상대 수·포지션·영역 미지정 스택은 수동 가정입니다.')
+        if s.settled_pot is not None:lines.append(f'중앙 팟 {s.settled_pot:g} / 총 팟 {s.pot:g}')
+        lines.extend(f'{a.player} · {a.street} · {a.action} · {a.amount:g}' for a in s.history[-12:])
         self.output.setPlainText("\n".join(lines))
         source = '수동 입력' if self.manual_mode else ('자동 인식' if self.is_auto() else ('직접 보정' if self.is_live() else '모의 화면'))
         self.dashboard.show_result(s,result,source,self.ranges.text(),self.is_live() and not self.is_auto() and not self.manual_mode)
@@ -449,6 +479,7 @@ class MainWindow(QMainWindow):
     def check_stale(self):
         threshold = max(2.0, self.interval.value()/1000 * 3)
         if not self.manual_mode and self.last_seen and time.monotonic() - self.last_seen > threshold:
+            self.last_table=None;self.seat_view.set_snapshot(None)
             self.invalidate("갱신 필요 (최신 화면 없음)")
         elif self.result_state is not None and not self.manual_mode:
             age=max(0,round(time.monotonic()-self.last_seen))

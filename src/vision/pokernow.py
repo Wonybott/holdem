@@ -3,12 +3,15 @@
 The reader deliberately rejects uncertain cards, ambiguous seats, and hidden
 call values. Only a positively detected action state can produce advice.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass,replace
+from math import hypot
 import hashlib
 import re
 import cv2
 import numpy as np
 from src.models.state import GameState
+from src.models.table import Seat,TableSnapshot
+from src.vision.seats import TableTracker,empty_rectangles,betting_pills,relative,ring_radius,polar,angle_distance,seat_position
 from src.vision.ocr import Box,Word,TesseractReader
 from src.vision.recognizer import Observation
 from src.vision.screen import TesseractNumbers
@@ -85,7 +88,7 @@ def table_bounds(image):
     possible=[]
     for c in contours:
         x,y,bw,bh=cv2.boundingRect(c)
-        if cv2.contourArea(c)>.10*w*h and bw>1.3*bh and bw>.4*w:
+        if cv2.contourArea(c)>.025*w*h and bw>1.3*bh and bw>.20*w:
             possible.append((cv2.contourArea(c),Box(x,y,bw,bh)))
     if not possible:raise ValueError('PokerNow 테이블을 찾지 못했습니다. 브라우저 테이블이 크게 보이도록 하세요.')
     return max(possible,key=lambda v:v[0])[1]
@@ -99,7 +102,7 @@ def card_groups(image,table):
         x,y,w,h=cv2.boundingRect(contour)
         if not (.10*table.h<h<.48*table.h and .28<w/h<4.5):continue
         if cv2.contourArea(contour)<.35*w*h:continue
-        if not (table.x-.2*table.w<x<table.x+1.2*table.w and table.y-.2*table.h<y<table.y+1.3*table.h):continue
+        if not (table.x-.4*table.w<x<table.x+1.4*table.w and table.y-.45*table.h<y<table.y+1.5*table.h):continue
         mask=np.zeros(image.shape[:2],np.uint8);cv2.drawContours(mask,[contour],-1,255,-1)
         result.append((Box(x,y,w,h),mask[y:y+h,x:x+w]))
     return result
@@ -147,17 +150,32 @@ def find_faces(image,table,reader):
     return faces,unreadable
 
 
-def arrange_faces(faces,table):
-    hero=[c for c in faces if c.box.cy>table.y+.76*table.h
-          and table.x+.23*table.w<c.box.cx<table.x+.80*table.w]
-    if len(hero)!=2:raise ValueError('내 홀 카드 2장을 자동 판독하지 못했습니다. 카드가 가려지지 않게 해 주세요.')
-    hero.sort(key=lambda c:c.box.x)
-    board=[c for c in faces if table.y+.16*table.h<c.box.cy<table.y+.64*table.h
-           and table.x+.13*table.w<c.box.cx<table.x+.87*table.w]
-    if len(board) not in (0,3,4,5):raise ValueError('공통 카드 일부를 읽지 못했습니다. 화면이 선명하게 보이도록 하세요.')
-    board.sort(key=lambda c:c.box.x)
-    if board and max(c.box.cy for c in board)-min(c.box.cy for c in board)>table.h*.08:
-        raise ValueError('공통 카드 행을 확정하지 못했습니다.')
+def arrange_faces(faces,table,hero_anchor=None):
+    # Board cards form a row of 3..5 separate, upright faces inside the felt.
+    # No hero-at-the-bottom assumption is used.
+    central=[c for c in faces if .6<c.group.w/c.group.h<1.15
+             and ring_radius(*relative(c.group,table))<.82]
+    rows=[]
+    for card in central:
+        row=[c for c in central if abs(c.group.cy-card.group.cy)<table.h*.07]
+        if len({c.group for c in row})==len(row) and 3<=len(row)<=5:
+            ordered=sorted(row,key=lambda c:c.group.cx)
+            gaps=[b.group.cx-a.group.cx for a,b in zip(ordered,ordered[1:])]
+            if gaps and max(gaps)<min(gaps)*1.35:rows.append(ordered)
+    board=max(rows,key=len) if rows else []
+    if len(central)>=3 and not board:raise ValueError('공통 카드 일부를 읽지 못했습니다.')
+    remaining=[c for c in faces if c not in board]
+    pairs=[]
+    for i,a in enumerate(remaining):
+        for b in remaining[i+1:]:
+            if abs(a.box.cy-b.box.cy)<table.h*.10 and abs(a.box.cx-b.box.cx)<table.h*.32:
+                pairs.append(sorted([a,b],key=lambda c:c.box.x))
+    if hero_anchor is not None:
+        pairs.sort(key=lambda pair:sum(hypot(c.box.cx-hero_anchor[0],c.box.cy-hero_anchor[1]) for c in pair))
+        if not pairs:raise ValueError('지정한 내 닉네임 주변에서 홀 카드 2장을 찾지 못했습니다.')
+        hero=pairs[0]
+    elif len(pairs)==1:hero=pairs[0]
+    else:raise ValueError('내 홀 카드 2장을 확정하지 못했습니다. 공개 카드가 여러 쌍이면 내 닉네임을 입력하세요.')
     return hero,board
 
 
@@ -175,7 +193,22 @@ def back_boxes(image,table):
     for c in contours:
         x,y,w,h=cv2.boundingRect(c)
         if .10*table.h<h<.35*table.h and .25<w/h<2.2:
-            boxes.append(Box(x,y,w,h))
+            tile=image[y:y+h,x:x+w]
+            if float(np.median(cv2.cvtColor(tile,cv2.COLOR_BGR2HSV)[:,:,2]))<125:boxes.append(Box(x,y,w,h))
+    gray=cv2.cvtColor(image,cv2.COLOR_BGR2GRAY)
+    edges=cv2.Canny(gray,35,90)
+    contours,_=cv2.findContours(edges,cv2.RETR_LIST,cv2.CHAIN_APPROX_SIMPLE)
+    for c in contours:
+        polygon=cv2.approxPolyDP(c,.025*cv2.arcLength(c,True),True)
+        if len(polygon)!=4:continue
+        x,y,w,h=cv2.boundingRect(polygon)
+        if not (.10*table.h<h<.35*table.h and .45<w/h<.95):continue
+        box=Box(x,y,w,h)
+        rx,ry=relative(box,table)
+        if not .72<ring_radius(rx,ry)<1.6:continue
+        tile=box.crop(image)
+        if float(np.median(cv2.cvtColor(tile,cv2.COLOR_BGR2HSV)[:,:,2]))>125:continue
+        if not any(hypot(b.cx-box.cx,b.cy-box.cy)<h*.3 for b in boxes):boxes.append(box)
     return boxes
 
 
@@ -195,20 +228,41 @@ def nickname_line(image,box):
 class PokerNowRecognizer:
     always_analyze=True
 
-    def __init__(self,reader=None,numbers=None):
+    def __init__(self,reader=None,numbers=None,hero_name=""):
         self.reader=reader if reader is not None else TesseractReader()
         self.numbers=numbers if numbers is not None else TesseractNumbers()
         self.boxes=[]
         self.table=None
         self.number_cache={}
         self.dealer_cache={}
+        self.tracker=TableTracker()
+        self.hero_name=hero_name.strip().casefold()
+        self.context_cache={}
+        self.slot_cache={}
+        self.pill_cache={}
+
+    def set_cancel(self,event):
+        self.reader.cancel=event
+        self.numbers.cancel=event
 
     @staticmethod
     def frame(image):
         if image is None or image.ndim!=3 or image.shape[2]!=3:raise ValueError('화면 이미지가 올바르지 않습니다.')
         h,w=image.shape[:2]
-        if w<700 or h<450:raise ValueError('테이블이 너무 작습니다. 브라우저를 확대하세요.')
-        return cv2.resize(image,(1920,round(h*1920/w)),interpolation=cv2.INTER_AREA) if w>1920 else image
+        if w<480 or h<260:raise ValueError('테이블이 너무 작습니다. 브라우저를 확대하세요.')
+        # Locate on a cheap preview, then crop the original pixels, including
+        # the surrounding seats and controls. Browser/desktop margins are not
+        # treated as game coordinates and do not shrink the OCR input.
+        ratio=min(1,1920/w)
+        preview=cv2.resize(image,(round(w*ratio),round(h*ratio)),interpolation=cv2.INTER_AREA) if ratio<1 else image
+        try:
+            t=table_bounds(preview)
+            x=max(0,round((t.x-t.w*.35)/ratio));right=min(w,round((t.x+t.w*1.35)/ratio))
+            y=max(0,round((t.y-t.h*.35)/ratio));bottom=min(h,round((t.y+t.h*1.55)/ratio))
+            image=image[y:bottom,x:right]
+        except ValueError:pass
+        h,w=image.shape[:2]
+        return cv2.resize(image,(1920,round(h*1920/w)),interpolation=cv2.INTER_AREA if w>1920 else cv2.INTER_CUBIC) if w!=1920 else image
 
     def signature(self,image):
         frame=self.frame(image)
@@ -217,15 +271,21 @@ class PokerNowRecognizer:
                       +sorted((b.x,b.y,b.w,b.h) for b in back_boxes(frame,self.table))).encode() if self.table else b''
         return repr(frame.shape).encode()+geometry+b''.join(b.crop(frame).tobytes() for b in self.boxes)
 
-    def amount(self,image,box):
-        # Whitespace for OCR, bounded to the actual screenshot.
+    def amount(self,image,box,expected=None):
         h,w=image.shape[:2]
-        padded=Box(max(0,box.x-3),max(0,box.y-3),min(box.w+6,w-max(0,box.x-3)),min(box.h+6,h-max(0,box.y-3)))
-        crop=padded.crop(image);key=(crop.shape,hashlib.sha256(crop.tobytes()).digest())
-        if key not in self.number_cache:
-            if len(self.number_cache)>100:self.number_cache.clear()
-            self.number_cache[key]=self.numbers.read(crop)
-        return self.number_cache[key]
+        values=[]
+        for pad in (3,8,12):
+            padded=Box(max(0,box.x-pad),max(0,box.y-pad),min(box.w+2*pad,w-max(0,box.x-pad)),min(box.h+2*pad,h-max(0,box.y-pad)))
+            crop=padded.crop(image);key=(crop.shape,hashlib.sha256(crop.tobytes()).digest())
+            if key not in self.number_cache:
+                if len(self.number_cache)>160:self.number_cache.clear()
+                self.number_cache[key]=self.numbers.read(crop)
+            value,score=self.number_cache[key]
+            if value is not None:
+                if expected is not None and value==expected:return value,score
+                values.append((value,score))
+        if expected is not None:return None,0
+        return max(values,key=lambda pair:pair[1]) if values and len({v for v,_ in values})==1 else (None,0)
 
     def dealer(self,image,table):
         white=cv2.inRange(image,(210,210,210),(255,255,255))
@@ -244,128 +304,374 @@ class PokerNowRecognizer:
                 if glyph is not None and glyph.shape[0]>h*.3:
                     ink=cv2.resize(glyph.astype(np.uint8)*255,None,fx=3,fy=3,interpolation=cv2.INTER_NEAREST)
                     text=cv2.copyMakeBorder(255-ink,20,20,20,20,cv2.BORDER_CONSTANT,value=255)
-                    readings=[self.reader.words(text,psm,'D') for psm in (6,13)]
-                    if all(len(r)==1 and r[0].text=='D' and r[0].confidence>=.8 for r in readings):
-                        value=min(r[0].confidence for r in readings)
+                    readings=[self.reader.words(text,psm,'D') for psm in (6,13,10)]
+                    valid=[r[0].confidence for r in readings if len(r)==1 and r[0].text=='D' and r[0].confidence>=.8]
+                    if len(valid)>=2:value=min(valid)
                 if len(self.dealer_cache)>32:self.dealer_cache.clear()
                 self.dealer_cache[key]=value
             confidence=self.dealer_cache[key]
             if confidence is not None:result.append(Word('D',confidence,box))
         return result
 
+    def slot_number(self,image,box):
+        roi=Box(box.x+5,box.y+4,round(box.w*.28),round(box.h*.40)).crop(image)
+        if not roi.size:return None
+        key=(roi.shape,hashlib.sha256(roi.tobytes()).digest())
+        if key in self.slot_cache:return self.slot_cache[key]
+        gray=cv2.cvtColor(roi,cv2.COLOR_BGR2GRAY)
+        gray=cv2.normalize(gray,None,0,255,cv2.NORM_MINMAX)
+        _,binary=cv2.threshold(gray,0,255,cv2.THRESH_BINARY+cv2.THRESH_OTSU)
+        if np.median(gray)>127:binary=255-binary
+        count,_,stats,_=cv2.connectedComponentsWithStats(binary)
+        glyphs=[s for s in stats[1:] if s[3]>roi.shape[0]*.20 and s[3]<roi.shape[0]*.95 and s[2]<roi.shape[1]*.65 and s[0]>1 and s[1]>0]
+        result=None
+        if glyphs:
+            x=min(s[0] for s in glyphs);y=min(s[1] for s in glyphs)
+            right=max(s[0]+s[2] for s in glyphs);bottom=max(s[1]+s[3] for s in glyphs)
+            glyph=255-binary[y:bottom,x:right]
+            glyph=cv2.copyMakeBorder(glyph,6,6,6,6,cv2.BORDER_CONSTANT,value=255)
+            value,score=self.numbers.read(cv2.cvtColor(glyph,cv2.COLOR_GRAY2BGR))
+            if value is not None and value.is_integer() and 1<=value<=10:result=int(value)
+        if len(self.slot_cache)>80:self.slot_cache.clear()
+        self.slot_cache[key]=result
+        return result
+
+    @staticmethod
+    def numeric_suffix(image,word,digits):
+        tile=word.box.crop(image)
+        gray=cv2.cvtColor(tile,cv2.COLOR_BGR2GRAY)
+        _,binary=cv2.threshold(gray,0,255,cv2.THRESH_BINARY+cv2.THRESH_OTSU)
+        if np.median(gray)>140:binary=255-binary
+        count,_,stats,_=cv2.connectedComponentsWithStats(binary)
+        glyphs=[s for s in stats[1:] if s[3]>.4*word.box.h and s[4]>2]
+        glyphs.sort(key=lambda s:s[0])
+        if len(glyphs)<digits:return None
+        glyphs=glyphs[-digits:]
+        x=min(s[0] for s in glyphs);y=min(s[1] for s in glyphs)
+        right=max(s[0]+s[2] for s in glyphs);bottom=max(s[1]+s[3] for s in glyphs)
+        return Box(word.box.x+int(x),word.box.y+int(y),int(right-x),int(bottom-y))
+
+    def bright_pot_rows(self,image,table):
+        mask=(np.min(image,axis=2)>185).astype(np.uint8)
+        count,_,stats,_=cv2.connectedComponentsWithStats(mask)
+        glyphs=[]
+        for x,y,w,h,area in stats[1:]:
+            if not (.016*table.h<h<.15*table.h and area>8):continue
+            if not (table.x+.25*table.w<x+w/2<table.x+.76*table.w and table.y-.12*table.h<y+h/2<table.y+.29*table.h):continue
+            glyphs.append(Box(int(x),int(y),int(w),int(h)))
+        rows=[]
+        for b in sorted(glyphs,key=lambda b:b.cy):
+            same=next((row for row in rows if abs(row[0].cy-b.cy)<max(row[0].h,b.h)*.45 and max(row[0].h,b.h)<min(row[0].h,b.h)*1.8),None)
+            if same is None:rows.append([b])
+            else:same.append(b)
+        result=[]
+        for row in rows:
+            row.sort(key=lambda b:b.x)
+            groups=[]
+            for b in row:
+                if not groups or b.x-(groups[-1][-1].x+groups[-1][-1].w)>b.h*1.7:groups.append([b])
+                else:groups[-1].append(b)
+            for group in groups:
+                x=min(b.x for b in group);y=min(b.y for b in group);right=max(b.x+b.w for b in group);bottom=max(b.y+b.h for b in group)
+                box=Box(max(0,x-10),max(0,y-10),right-x+20,bottom-y+20);crop=box.crop(image)
+                key=('potrow',crop.shape,hashlib.sha256(crop.tobytes()).digest())
+                if key not in self.context_cache:self.context_cache[key]=self.reader.words(crop,7)
+                for word in self.context_cache[key]:
+                    b=word.box
+                    result.append(Word(word.text,word.confidence,Box(box.x+b.x,box.y+b.y,b.w,b.h)))
+        return result
+
+    def contextual_words(self,image,table,words):
+        regions=[(Box(round(table.x+table.w*.23),round(table.y-table.h*.10),round(table.w*.54),round(table.h*.43)),6),
+                 (Box(round(table.x+table.w*.18),round(table.y+table.h*.57),round(table.w*.64),round(table.h*.37)),6)]
+        regions += [(b,6) for b in empty_rectangles(image,table)]
+        regions += [(b,7) for b in betting_pills(image,table)]
+        merged=list(words)
+        for word in self.bright_pot_rows(image,table):
+            duplicate=next((i for i,w in enumerate(merged) if w.text==word.text and hypot(w.box.cx-word.box.cx,w.box.cy-word.box.cy)<max(5,word.box.h*.6)),None)
+            if duplicate is None:merged.append(word)
+            elif word.confidence>merged[duplicate].confidence:merged[duplicate]=word
+        for box,psm in regions:
+            x=max(0,box.x);y=max(0,box.y);crop=Box(x,y,box.w,box.h).crop(image)
+            if not crop.size:continue
+            key=(crop.shape,psm,hashlib.sha256(crop.tobytes()).digest())
+            if key not in self.context_cache:
+                if len(self.context_cache)>80:self.context_cache.clear()
+                self.context_cache[key]=self.reader.words(crop,psm)
+            for word in self.context_cache[key]:
+                b=word.box;global_word=Word(word.text,word.confidence,Box(x+b.x,y+b.y,b.w,b.h))
+                duplicate=next((i for i,w in enumerate(merged) if w.text==word.text and hypot(w.box.cx-global_word.box.cx,w.box.cy-global_word.box.cy)<max(5,b.h*.6)),None)
+                if duplicate is None:merged.append(global_word)
+                elif merged[duplicate].confidence<word.confidence:merged[duplicate]=global_word
+        return merged
+
+    def pots(self,image,words,table,faces=()):
+        area=[w for w in words if table.x+.23*table.w<w.box.cx<table.x+.77*table.w
+              and table.y-.10*table.h<w.box.cy<table.y+.31*table.h]
+        groups=[g for g,_ in card_groups(image,table)]
+        numeric=[w for w in area if number(w.text) is not None and w.confidence>=.85 and not any(g.contains(w.box) for g in groups)]
+        primary_options=[]
+        for w in numeric:
+            if w.box.cy<table.y+.035*table.h:continue
+            patch=Box(w.box.x-5,w.box.y-4,w.box.w+10,w.box.h+8).crop(image)
+            if np.median(cv2.cvtColor(patch,cv2.COLOR_BGR2HSV)[:,:,2])>180:continue
+            primary_options.append(w)
+        if not primary_options:raise ValueError('팟 숫자를 확정하지 못했습니다.')
+        primary=max(primary_options,key=lambda w:w.box.h)
+        settled,confidence=self.amount(image,primary.box,number(primary.text))
+        if settled is None or settled!=number(primary.text):raise ValueError('중앙 팟 OCR 불일치')
+        total=None;used=[primary.box]
+        labels=[w for w in area if w.text.lower().rstrip(':')=='total']
+        totals=[]
+        for label in labels:
+            for w in numeric:
+                if w is primary:continue
+                if abs(w.box.cy-label.box.cy)<label.box.h*1.5 and 0<=w.box.x-label.box.x<label.box.w+table.w*.12:
+                    value,score=self.amount(image,w.box,number(w.text))
+                    if value is not None and value<settled:raise ValueError('총 팟이 중앙 팟보다 작아 판독을 보류합니다.')
+                    if value==number(w.text) and value>=settled:
+                        totals.append(value);used.append(w.box);confidence=min(confidence,score)
+        for w in area:
+            match=re.fullmatch(r'total[: ]*([\d,]+(?:\.\d+)?)',w.text,re.IGNORECASE)
+            if match:
+                value=number(match[1]);box=self.numeric_suffix(image,w,len(match[1].replace(',','').replace('.','')))
+                if box and value is not None:
+                    confirmed,score=self.amount(image,box,value)
+                    if confirmed==value and value>=settled:totals.append(value);used.append(box);confidence=min(confidence,score)
+        if len(set(totals))>1:raise ValueError('총 팟 표시가 서로 다릅니다.')
+        if totals:total=totals[0]
+        return settled,total,confidence,used
+
+    def players(self,image,words,table,faces,pot_boxes):
+        numeric=[w for w in words if number(w.text) is not None and w.confidence>=.85]
+        players=[]
+        for token in numeric:
+            b=token.box
+            if any(p.contains(b) for p in pot_boxes):continue
+            if any(abs(c.box.cx-b.cx)<c.group.h*.65 and c.box.y-c.group.h*.05<b.cy<c.box.y+c.group.h*.8 for c in faces):continue
+            x,y=relative(b,table)
+            if (x>1 or x<0) and y<.05:continue  # Table header blinds are not a player stack.
+            if not .72<ring_radius(x,y)<1.70 or b.h<table.h*.017:continue
+            tile=b.crop(image)
+            if not tile.size:continue
+            # Colored trophy/counter/bet badges are not player stacks.
+            surround=Box(b.x-4,b.y-3,b.w+8,b.h+6).crop(image)
+            hsv=cv2.cvtColor(surround,cv2.COLOR_BGR2HSV)
+            if float(np.median(hsv[:,:,1]))>75:continue
+            names=[w for w in words if number(w.text) is None and len(w.text)>=2
+                   and 0<b.y-w.box.cy<table.h*.09 and abs(w.box.cx-b.cx)<table.h*.24]
+            if not names and not nickname_line(image,b):continue
+            stack,score=self.amount(image,b,number(token.text))
+            if stack is None or stack!=number(token.text):continue
+            name=min(names,key=lambda w:abs(w.box.cx-b.cx)+abs(w.box.cy-b.y)).text if names else ''
+            if any(hypot(x-p[0].x,y-p[0].y)<.07 for p in players):continue
+            seat=Seat(f'tmp{len(players)}',x,y,occupied=True,name=name,stack=stack)
+            players.append((seat,b,score))
+        return players
+
+    def pill_amount(self,image,pill):
+        tile=pill.crop(image);key=(tile.shape,hashlib.sha256(tile.tobytes()).digest())
+        if key in self.pill_cache:return self.pill_cache[key]
+        hsv=cv2.cvtColor(tile,cv2.COLOR_BGR2HSV)
+        background=cv2.inRange(hsv,(25,90,130),(85,255,255))
+        contours,_=cv2.findContours(background,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+        value=None;score=0
+        if contours:
+            inside=np.zeros(background.shape,np.uint8);cv2.drawContours(inside,[max(contours,key=cv2.contourArea)],-1,255,-1)
+            inside=cv2.erode(inside,np.ones((5,5),np.uint8))>0
+            ink=(cv2.cvtColor(tile,cv2.COLOR_BGR2GRAY)<120)&inside
+            glyph=trim(ink)
+            if glyph is not None:
+                clean=cv2.copyMakeBorder(255-glyph.astype(np.uint8)*255,10,10,10,10,cv2.BORDER_CONSTANT,value=255)
+                value,score=self.numbers.read(cv2.cvtColor(clean,cv2.COLOR_GRAY2BGR))
+                words=self.reader.words(clean,7)
+                if len(words)!=1 or number(words[0].text)!=value:value=None
+        if len(self.pill_cache)>80:self.pill_cache.clear()
+        self.pill_cache[key]=(value,score)
+        return value,score
+
+    def layout(self,image,words,table,faces,pot_boxes):
+        players=self.players(image,words,table,faces,pot_boxes)
+        slots=[]
+        for box in empty_rectangles(image,table):
+            x,y=relative(box,table)
+            n=None if any(box.contains(b) for _,b,_ in players) else self.slot_number(image,box)
+            slots.append(Seat(f'empty{len(slots)}',x,y,number=n,occupied=False if n is not None else None))
+        for seat,_,_ in players:
+            matches=sorted((hypot(seat.x-s.x,seat.y-s.y),i) for i,s in enumerate(slots))
+            if matches and matches[0][0]<.22:
+                i=matches[0][1];slots[i]=replace(seat,slot_id=slots[i].slot_id,number=slots[i].number)
+            else:slots.append(seat)
+        # Identical OCR numbers on different outlines are not trusted as site IDs.
+        counts={n:sum(s.number==n for s in slots) for n in {s.number for s in slots if s.number is not None}}
+        slots=[replace(s,number=None) if s.number is not None and counts[s.number]>1 else s for s in slots]
+        occupied=[s for s in slots if s.occupied is True]
+        def assign(box):
+            x,y=relative(box,table)
+            d=sorted((hypot(s.x-x,s.y-y),s.slot_id) for s in occupied)
+            return d[0][1] if d and d[0][0]<.30 and (len(d)==1 or d[1][0]-d[0][0]>.025) else None
+        active=set();card_owners=[]
+        self.unassigned_outer=0
+        for box in list({c.group for c in faces})+back_boxes(image,table):
+            identifier=assign(box)
+            if identifier:active.add(identifier);card_owners.append((box,identifier))
+            elif ring_radius(*relative(box,table))>.82:self.unassigned_outer+=1
+        angles={s.slot_id:polar(s.x,s.y) for s in occupied}
+        def angular(box):
+            angle=polar(*relative(box,table))
+            values=sorted((angle_distance(angle,a),key) for key,a in angles.items())
+            return values[0][1] if values and values[0][0]<.50 and (len(values)==1 or values[1][0]-values[0][0]>.10) else None
+        bets={};pills=betting_pills(image,table);unread=0
+        for pill in pills:
+            values=[w for w in words if pill.contains(w.box) and number(w.text) is not None and w.confidence>=.85]
+            amounts={number(w.text) for w in values}
+            if len(amounts)!=1:
+                value,score=self.pill_amount(image,pill);identifier=angular(pill)
+                if value is None or identifier is None:unread+=1;continue
+                if identifier in bets:unread+=1;continue
+                bets[identifier]=value;active.add(identifier);continue
+            expected=next(iter(amounts));value=None
+            for word in sorted(values,key=lambda w:w.confidence,reverse=True):
+                value,score=self.amount(image,word.box,expected)
+                if value==expected:break
+            identifier=angular(pill)
+            if value!=expected or identifier is None:unread+=1;continue
+            if identifier in bets:unread+=1;continue
+            bets[identifier]=value;active.add(identifier)
+        actions={}
+        for w in words:
+            label=w.text.lower()
+            if label not in ('check','fold','call','bet','raise') or w.confidence<.75:continue
+            if ring_radius(*relative(w.box,table))>.97:continue
+            near=sorted((hypot((w.box.cx-b.cx)/table.w,(w.box.cy-b.cy)/table.h),owner) for b,owner in card_owners)
+            identifier=near[0][1] if near and near[0][0]<.30 and (len(near)==1 or near[1][1]==near[0][1] or near[1][0]-near[0][0]>.03) else angular(w.box)
+            if identifier:actions[identifier]=label
+        offline={angular(w.box) for w in words if w.text.upper()=='OFFLINE' and w.confidence>=.75}
+        dealer=None
+        for token in self.dealer(image,table):
+            identifier=angular(token.box)
+            if identifier:dealer=identifier
+        waiting_ids=set()
+        for word in words:
+            if word.text.upper()!='WAITING' or word.confidence<.8:continue
+            x,y=relative(word.box,table)
+            near=sorted((hypot(s.x-x,s.y-y),s.slot_id) for s in occupied)
+            if near and near[0][0]<.16 and ring_radius(x,y)>.85:waiting_ids.add(near[0][1])
+        slots=tuple(replace(s,bet=bets.get(s.slot_id),in_hand=(False if s.slot_id in waiting_ids or actions.get(s.slot_id)=='fold' else (True if s.slot_id in active else None)),
+                            last_action=actions.get(s.slot_id,''),dealer=s.slot_id==dealer,offline=s.slot_id in offline,waiting=s.slot_id in waiting_ids) for s in slots)
+        return slots,players,pills,unread
+
+
     def analyze(self,image):
         result=Observation()
         try:
-            image=self.frame(image)
-            table=table_bounds(image)
-            faces,unreadable=find_faces(image,table,self.reader)
-            hero,board=arrange_faces(faces,table)
-            geometric_board=[g for g,_ in card_groups(image,table)
-                             if table.y+.15*table.h<g.cy<table.y+.65*table.h
-                             and table.x+.13*table.w<g.cx<table.x+.87*table.w
-                             and .6<g.w/g.h<1.15]
-            if len(geometric_board)!=len(board):
-                raise ValueError('보드의 카드 수와 판독 결과가 다릅니다. 일부 카드를 읽지 못했습니다.')
-            # Any unresolved suit/rank within the board or hero area invalidates it.
-            relevant=[b for b in unreadable if (table.y+.12*table.h<b.cy<table.y+.65*table.h)
-                      or (b.cy>table.y+.76*table.h and table.x+.23*table.w<b.cx<table.x+.80*table.w)]
-            if relevant:raise ValueError('카드 일부의 숫자 또는 무늬가 불확실합니다.')
-            words=self.reader.words(image)
-            numeric=[w for w in words if number(w.text) is not None and w.confidence>=.85]
-            pots=[w for w in numeric if table.x+.33*table.w<w.box.cx<table.x+.67*table.w
-                  and table.y+.04*table.h<w.box.cy<table.y+.28*table.h]
-            if len(pots)!=1:raise ValueError('팟 숫자를 자동으로 확정하지 못했습니다.')
-            pot,pot_conf=self.amount(image,pots[0].box)
-            if pot is None or pot!=number(pots[0].text):raise ValueError('팟 OCR 인식 실패 또는 판독 불일치')
-            backs=back_boxes(image,table)
-            front=[c.group for c in faces]
-            seats=[]
-            for token in numeric:
-                b=token.box
-                on_card=any(abs(c.box.cx-b.cx)<c.group.h*.65
-                            and c.box.y-c.group.h*.05<b.cy<c.box.y+c.group.h*.8 for c in faces)
-                if token is pots[0] or on_card:continue
-                if not (table.y-.12*table.h<b.cy<table.y+1.22*table.h):continue
-                if b.h<table.h*.022:continue
-                # Require a card group beside the stack to avoid HUD/bet numbers.
-                near=[c for c in front+backs if abs(c.cy-b.cy)<table.h*.22
-                      and -table.h*.1<b.cx-c.cx<table.h*.65]
-                if not near:continue
-                # A name line above is a second independent seat cue. It may be
-                # low-confidence when an English OCR encounters a Korean name.
-                names=[w for w in words if number(w.text) is None and len(w.text)>=2
-                       and 0<b.y-w.box.cy<table.h*.09 and abs(w.box.cx-b.cx)<table.h*.24]
-                if not names and not nickname_line(image,b):continue
-                stack,confidence=self.amount(image,b)
-                if stack is None or stack!=number(token.text):raise ValueError('플레이어 스택 OCR 인식 실패 또는 판독 불일치')
-                seats.append((token,stack,confidence))
-            # Deduplicate nearby fragments rather than counting text twice.
-            seats.sort(key=lambda v:(v[0].box.y,v[0].box.x))
-            for a,b in zip(seats,seats[1:]):
-                if abs(a[0].box.cy-b[0].box.cy)<table.h*.025 and abs(a[0].box.cx-b[0].box.cx)<table.h*.12:
-                    raise ValueError('플레이어 스택이 중복/분할 인식됐습니다.')
-            if not 2<=len(seats)<=9:raise ValueError('상대 수와 스택을 확정하지 못했습니다. 플레이어 영역을 가리지 마세요.')
-            hero_x=sum(c.box.cx for c in hero)/2;hero_y=sum(c.box.cy for c in hero)/2
-            distances=[abs(s[0].box.cy-hero_y)+abs(s[0].box.cx-hero_x)*.25 for s in seats]
-            hero_index=int(np.argmin(distances))
-            if distances[hero_index]>table.h*.26:raise ValueError('내 스택 위치를 확정하지 못했습니다.')
-            my_seat=seats[hero_index]
-            ordered=[my_seat]+[s for i,s in enumerate(seats) if i!=hero_index]
-            # In the supplied theme, the current player panel is light and the
-            # others dark. Read actual background around the stack, not the glyph.
+            image=self.frame(image);table=table_bounds(image)
+            words=self.contextual_words(image,table,self.reader.words(image))
+            paused=any('paused' in w.text.lower() and ring_radius(*relative(w.box,table))<1 for w in words)
+            waiting_words=[w for w in words if w.text.lower()=='waiting' and ring_radius(*relative(w.box,table))<.9]
+            waiting=any(any(t.text.lower() in ('others','for') and abs(t.box.cy-w.box.cy)<w.box.h*2 and abs(t.box.cx-w.box.cx)<table.w*.5 for t in words) for w in waiting_words)
+            faces,unreadable=find_faces(image,table,self.reader) if not waiting else ([],[])
+            try:settled,explicit_total,pot_conf,pot_boxes=self.pots(image,words,table,faces)
+            except ValueError:
+                if not waiting:raise
+                settled=explicit_total=None;pot_conf=0;pot_boxes=[]
+            seats,players,pills,unread_bets=self.layout(image,words,table,faces,pot_boxes)
+            seats,_=self.tracker.identify(seats)
+            result.table=TableSnapshot(seats,'paused' if paused else 'observing',None,settled,explicit_total if explicit_total is not None else (settled if not pills else None))
+            if waiting:
+                seats,hero_id=self.tracker.update(seats,'waiting')
+                self.hero_point=None
+                result.table=TableSnapshot(seats,'waiting',hero_id,settled,explicit_total if explicit_total is not None else settled)
+                self.table=table;self.boxes=pot_boxes+[b for _,b,_ in players]
+                return result
+            anchor=None
+            if self.hero_name:
+                matches=[p for p in players if p[0].name.casefold()==self.hero_name]
+                if len(matches)!=1:raise ValueError('내 닉네임을 찾지 못했습니다. 닉네임 입력 또는 화면 가림을 확인하세요.')
+                anchor=(matches[0][1].cx,matches[0][1].cy)
+            elif getattr(self,'hero_point',None) is not None:
+                x,y=self.hero_point;anchor=(table.x+x*table.w,table.y+y*table.h)
+            hero,board=arrange_faces(faces,table,anchor)
+            geometric=[g for g,_ in card_groups(image,table) if .6<g.w/g.h<1.15 and ring_radius(*relative(g,table))<.82 and g not in {c.group for c in hero}]
+            if len(geometric)!=len(board):raise ValueError('공통 카드의 수와 판독 결과가 다릅니다.')
+            hx=sum(c.box.cx for c in hero)/2;hy=sum(c.box.cy for c in hero)/2
+            hero_xy=((hx-table.x)/table.w,(hy-table.y)/table.h)
+            candidates=sorted((hypot(s.x-hero_xy[0],s.y-hero_xy[1]),s.slot_id) for s in seats if s.occupied is True)
+            if not candidates or candidates[0][0]>.30 or (len(candidates)>1 and candidates[1][0]-candidates[0][0]<.025):raise ValueError('내 카드와 좌석 연결이 불확실합니다.')
+            hero_id=candidates[0][1]
+            seats=tuple(replace(s,hero=s.slot_id==hero_id,in_hand=True if s.slot_id==hero_id else s.in_hand) for s in seats)
+            street={0:'Preflop',3:'Flop',4:'Turn',5:'River'}[len(board)]
+            seats,hero_id=self.tracker.update(seats,'paused' if paused else 'playing',hero_id,street,tuple(c.card for c in hero))
+            total=explicit_total if explicit_total is not None else (settled if not pills else None)
+            notes=tuple(['총 팟 표시 확인 필요'] if total is None else [])
+            result.table=TableSnapshot(seats,'paused' if paused else 'playing',hero_id,settled,total,notes)
+            if self.unassigned_outer:raise ValueError('카드가 보이지만 좌석·스택을 연결하지 못한 플레이어가 있습니다.')
+            if total is None:raise ValueError('현재 베팅과 별도인 total 총 팟 표시를 읽지 못해 EV를 보류합니다.')
+            if any(s.occupied is True and s.slot_id!=hero_id and s.in_hand is None for s in seats):raise ValueError('일부 좌석의 핸드 참여 여부가 불확실합니다. 빈 자리나 접은 사람을 상대 수로 가정하지 않습니다.')
+            active=[s for s in seats if s.occupied is True and s.in_hand is True]
+            mine=next(s for s in active if s.slot_id==hero_id)
+            active=[mine]+[s for s in active if s.slot_id!=hero_id]
+            if not 2<=len(active)<=10:raise ValueError('남은 상대가 없거나 현재 참여자 수를 확정하지 못했습니다.')
             light=[]
-            for i,(token,_,_) in enumerate(ordered):
-                b=token.box
-                panel=Box(b.x-5,b.y-5,b.w+10,b.h+10).crop(image)
-                hsv=cv2.cvtColor(panel,cv2.COLOR_BGR2HSV)
+            for seat in active:
+                b=next(b for raw,b,_ in players if hypot(raw.x-seat.x,raw.y-seat.y)<.22)
+                panel=Box(b.x-5,b.y-5,b.w+10,b.h+10).crop(image);hsv=cv2.cvtColor(panel,cv2.COLOR_BGR2HSV)
                 light.append(float(((hsv[:,:,2]>210)&(hsv[:,:,1]<45)).mean())>.55)
-            hero_turn=True if light[0] and sum(light)==1 else (False if not light[0] and sum(light)==1 else None)
-            call,call_conf,action_box=self.read_action(image,words,table,hero_turn,self.amount)
-            dealer=self.dealer(image,table)
-            position='UNKNOWN'
-            for d in dealer:
-                locations=[(abs(d.box.cx-s[0].box.cx)*.5+abs(d.box.cy-s[0].box.cy),i) for i,s in enumerate(ordered)]
-                distance,index=min(locations)
-                if distance<table.h*.4:
-                    if index==0:position='BTN'
-                    elif len(ordered)==2:position='BB'
-            result.state=GameState(tuple(c.card for c in hero),tuple(c.card for c in board),pot,call,
-                                   tuple(s[1] for s in ordered),len(ordered)-1,position,hero_turn=hero_turn)
-            result.confidence={**{f'card{i}':c.confidence for i,c in enumerate(hero+board)},
-                               'pot':pot_conf,**{f'stack{i}':s[2] for i,s in enumerate(ordered)}}
+            turn=True if light[0] and sum(light)==1 else (False if not light[0] and sum(light)==1 else None)
+            yours=[w for w in words if w.text.upper()=='YOUR' and w.confidence>=.8]
+            if any(any(t.text.upper()=='TURN' and abs(t.box.cy-y.box.cy)<y.box.h for t in words) for y in yours):turn=True
+            if paused:turn=None
+            call,call_conf,action_box=self.read_action(image,words,table,turn,self.amount)
+            position=seat_position(seats,hero_id,self.tracker.dealt)
+            result.state=GameState(tuple(c.card for c in hero),tuple(c.card for c in board),total,call,
+                                   tuple(s.stack for s in active),len(active)-1,position,
+                                   tuple(self.tracker.history),turn,seats,settled,paused)
+            result.confidence={**{f'card{i}':c.confidence for i,c in enumerate(hero+board)},'pot':pot_conf,
+                               **{f'stack{i}':v[2] for i,v in enumerate(players)}}
             if call is not None:result.confidence['to_call']=call_conf
-            self.table=table
-            number_boxes=[pots[0].box]+[s[0].box for s in ordered]
-            expanded=[Box(b.x-4,b.y-4,b.w*2+8,b.h+8) for b in number_boxes]
-            self.boxes=list({c.group for c in faces})+expanded
-            # Include all action controls and seat brightness; exclude clocks/chat.
-            self.boxes+=[Box(s[0].box.x-5,s[0].box.y-5,s[0].box.w+10,s[0].box.h+10) for s in ordered]
+            self.hero_point=(mine.x,mine.y)
+            self.table=table;self.boxes=list({c.group for c in faces})+pot_boxes+[b for _,b,_ in players]+pills
+            self.boxes += [Box(b.x-4,b.y-4,b.w*2+8,b.h+8) for _,b,_ in players]
+            self.boxes.append(Box(round(table.x+table.w*.18),round(table.y+table.h*.57),round(table.w*.64),round(table.h*.37)))
             if action_box:self.boxes.append(Box(action_box.x-6,action_box.y-4,action_box.w*2+12,action_box.h+8))
-            self.boxes += [d.box for d in dealer]
-        except (ValueError,TypeError,cv2.error) as exc:
-            self.boxes=[]
-            self.table=None
+        except (ValueError,TypeError,StopIteration,cv2.error) as exc:
+            self.boxes=[];self.table=None
             result.errors.append(f'자동 인식 실패: {exc}')
         return result
 
     @staticmethod
+    def enabled(image,word):
+        tile=word.box.crop(image)
+        if not tile.size:return False
+        hsv=cv2.cvtColor(tile,cv2.COLOR_BGR2HSV)
+        bright=((hsv[:,:,1]>55)&(hsv[:,:,2]>105))
+        if float(np.median(hsv[:,:,2]))<120:bright|=(hsv[:,:,2]>185)
+        return float(bright.mean())>.08
+
+    @staticmethod
     def read_action(image,words,table,hero_turn,amount_reader=None):
         if hero_turn is not True:return None,0,None
-        candidates=[w for w in words if w.text.upper() in ('CHECK','CALL','FOLD')
-                    and w.box.cy>table.y+.92*table.h and w.box.cx>table.x+.45*table.w]
+        candidates=[w for w in words if re.match(r'^(CHECK|CALL|FOLD)(?:[ (\d]|$)',w.text.upper())
+                    and w.box.cy>table.y+.88*table.h and w.box.cx>table.x+.35*table.w]
         if not candidates:return None,0,None
         bottom=max(w.box.cy for w in candidates)
-        row=[w for w in words if abs(w.box.cy-bottom)<table.h*.06 and w.box.cx>table.x+.4*table.w]
-        labels={w.text.upper() for w in row if w.confidence>=.85}
-        if 'OR' in labels or 'FOLD' not in labels or not labels.intersection({'BET','RAISE','CALL','ALL-IN'}):return None,0,None
-        checks=[w for w in row if w.text.upper()=='CHECK' and w.confidence>=.85]
-        calls=[w for w in row if w.text.upper()=='CALL' and w.confidence>=.85]
-        if checks and not calls:return 0.0,checks[0].confidence,checks[0].box
-        if len(calls)==1:
-            amounts=[w for w in row if number(w.text.strip('()')) is not None
-                     and abs(w.box.cx-calls[0].box.cx)<table.h*.22]
-            if len(amounts)==1 and amount_reader is not None:
-                value,confidence=amount_reader(image,amounts[0].box)
-                if value==number(amounts[0].text.strip('()')):
-                    return value,min(calls[0].confidence,confidence),amounts[0].box
+        row=[w for w in words if abs(w.box.cy-bottom)<table.h*.06 and w.box.cx>table.x+.30*table.w]
+        labels={re.sub(r'[^A-Z].*','',w.text.upper()) for w in row if w.confidence>=.85 and PokerNowRecognizer.enabled(image,w)}
+        if any(w.text.upper()=='OR' for w in row) or 'FOLD' not in labels or not labels.intersection({'BET','RAISE','CALL','ALL'}):return None,0,None
+        calls=[w for w in row if w.text.upper().startswith('CALL') and w.confidence>=.85 and PokerNowRecognizer.enabled(image,w)]
+        checks=[w for w in row if w.text.upper()=='CHECK' and w.confidence>=.85 and PokerNowRecognizer.enabled(image,w)]
+        if calls:
+            if len(calls)!=1:return None,0,None
+            word=calls[0];joined=re.fullmatch(r'CALL[ (]*([\d,]+(?:\.\d+)?)[ )]*',word.text.upper())
+            if joined:
+                expected=number(joined[1]);box=PokerNowRecognizer.numeric_suffix(image,word,len(re.sub(r'\D','',joined[1])))
+                if box is None:return None,0,None
+            else:
+                amounts=[w for w in row if number(w.text.strip('()')) is not None and abs(w.box.cx-word.box.cx)<table.h*.22]
+                if len(amounts)!=1:return None,0,None
+                expected=number(amounts[0].text.strip('()'));box=amounts[0].box
+            if amount_reader is None:return None,0,None
+            value,confidence=amount_reader(image,box,expected)
+            return (value,min(word.confidence,confidence),box) if value==expected else (None,0,None)
+        if checks:return 0.0,checks[0].confidence,checks[0].box
         return None,0,None

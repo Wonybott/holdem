@@ -3,6 +3,7 @@ from typing import Protocol
 import cv2
 import numpy as np
 from src.models.state import GameState
+from src.models.table import TableSnapshot
 from src.vision.mock import (WIDTH, HEIGHT, CARD_SLOTS, CARD_H, CARD_W, CARD_TEMPLATES,
                              FIELDS, CELL_H, CELL_W, CELLS, GLYPH_TEMPLATES, header)
 
@@ -17,6 +18,7 @@ class Observation:
     state: GameState | None = None
     confidence: dict[str, float] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
+    table: TableSnapshot | None = None
 
 
 def similarity(a, b):
@@ -103,7 +105,7 @@ class MockRecognizer:
             if any(c != "--" for c in board[count:]):
                 raise ValueError("보드 슬롯 사이에 빈 카드가 있습니다.")
             opponents = int(values["opponents"])
-            if not 1 <= opponents <= 8:
+            if not 1 <= opponents <= 9:
                 raise ValueError("상대 수 인식 실패")
             result.state = GameState(tuple(cards[:2]), tuple(board[:count]), float(values["pot"]),
                                      float(values["to_call"]),
