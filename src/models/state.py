@@ -30,11 +30,12 @@ class GameState:
     hole: tuple[str, ...] = ("As", "Kh")
     board: tuple[str, ...] = ("Qs", "Jh", "2c")
     pot: float = 120
-    to_call: float = 20
+    to_call: float | None = 20
     stacks: tuple[float, ...] = (1000, 1000, 1000)
     opponents: int = 2
     position: str = "BTN"
     history: tuple[Action, ...] = ()
+    hero_turn: bool | None = True
 
     def __post_init__(self):
         validate_cards(self.hole + self.board)
@@ -44,9 +45,12 @@ class GameState:
             raise ValueError("상대 수는 1~8명이어야 합니다.")
         if len(self.stacks) != self.opponents + 1:
             raise ValueError("스택은 나, 상대 순으로 상대 수+1개 입력하세요.")
-        if any(not isfinite(x) or x < 0 for x in (self.pot, self.to_call, *self.stacks)):
+        money = (self.pot, *self.stacks) + (() if self.to_call is None else (self.to_call,))
+        if any(not isfinite(x) or x < 0 for x in money):
             raise ValueError("팟/콜/스택은 유한한 0 이상의 숫자여야 합니다.")
-        if self.to_call > self.stacks[0]:
+        if self.hero_turn is not None and type(self.hero_turn) is not bool:
+            raise ValueError("내 차례 여부는 True/False/None이어야 합니다.")
+        if self.to_call is not None and self.to_call > self.stacks[0]:
             raise ValueError("콜은 내 유효 콜 금액 이하여야 합니다. 사이드 팟은 미지원입니다.")
         if self.position not in POSITIONS:
             raise ValueError("지원하지 않는 포지션입니다.")

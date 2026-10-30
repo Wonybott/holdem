@@ -55,3 +55,51 @@ class ReferenceCapture(QThread):
             self.captured.emit(image,bounds)
         except Exception as exc:
             self.failed.emit(str(exc))
+
+
+class AutomaticMonitorCapture:
+    """Capture the explicitly selected monitor; layout is discovered per frame."""
+    def __init__(self,monitor=1,session_factory=None):
+        if not 1<=monitor<=16:raise ValueError('모니터 번호는 1~16입니다.')
+        if session_factory is None:
+            if sys.platform!='win32':raise RuntimeError('실제 자동 캡처는 내 Windows PC에서 실행하세요.')
+            import mss
+            session_factory=mss.mss
+        self.monitor,self.session_factory=monitor,session_factory
+
+    def grab(self):
+        with self.session_factory() as session:
+            bounds=monitor_bounds(session,self.monitor)
+            image=np.asarray(session.grab(bounds))[:,:,:3].copy()
+            return mask_application_windows(image,bounds)
+
+
+def mask_application_windows(image,bounds):
+    """Ignore this analyzer's own windows, preventing visual feedback loops.
+
+    Windows coordinates are queried inside the capture thread. This neither
+    inspects browser internals nor changes another application's windows.
+    """
+    if sys.platform!='win32':return image
+    import ctypes
+    from ctypes import wintypes
+    import os
+    u=ctypes.WinDLL('user32',use_last_error=True)
+    callback_type=ctypes.WINFUNCTYPE(wintypes.BOOL,wintypes.HWND,wintypes.LPARAM)
+    u.EnumWindows.argtypes=[callback_type,wintypes.LPARAM]
+    u.GetWindowThreadProcessId.argtypes=[wintypes.HWND,ctypes.POINTER(wintypes.DWORD)]
+    u.IsWindowVisible.argtypes=[wintypes.HWND]
+    u.IsIconic.argtypes=[wintypes.HWND]
+    u.GetWindowRect.argtypes=[wintypes.HWND,ctypes.POINTER(wintypes.RECT)]
+    def visit(hwnd,_):
+        pid=wintypes.DWORD();u.GetWindowThreadProcessId(hwnd,ctypes.byref(pid))
+        if pid.value==os.getpid() and u.IsWindowVisible(hwnd) and not u.IsIconic(hwnd):
+            rect=wintypes.RECT()
+            if u.GetWindowRect(hwnd,ctypes.byref(rect)):
+                left=max(0,rect.left-bounds['left']);top=max(0,rect.top-bounds['top'])
+                right=min(image.shape[1],rect.right-bounds['left']);bottom=min(image.shape[0],rect.bottom-bounds['top'])
+                if right>left and bottom>top:image[top:bottom,left:right]=0
+        return True
+    callback=callback_type(visit)
+    if not u.EnumWindows(callback,0):raise RuntimeError('분석창 영역을 제외하지 못했습니다. 분석을 다시 시작하세요.')
+    return image

@@ -7,3 +7,5 @@
 - mock_river.png: As Kh / Qs Jh 2c 3d 4s, 팟 300, 콜 0, 상대 2
 
 `dashboard_example.png`는 새 플레이 화면을 자체 모의 데이터로 렌더링한 UI 예시입니다. 인식 테스트 fixture나 실제 PokerNow 화면이 아닙니다.
+
+`pokernow_layout_demo.png`는 자동 탐지 검사에 쓰는 **자체 생성 이미지**입니다. 사용자가 올린 사진/실제 사이트 캡처를 재배포한 것이 아닙니다. `python -m src.main --analyze assets/pokernow_layout_demo.png --pokernow`로 보정 없이 카드·팟·스택을 판독할 수 있습니다. `automatic_dashboard_example.png`는 같은 검증 상태를 자동 인식 화면에 표시한 UI 예시입니다.

@@ -59,6 +59,7 @@ class AnalysisWorker(QThread):
         last_key = None
         last_frame_key = None
         cached = None
+        equity_cache = {}
         while not self.stop_event.is_set():
             started = time.monotonic()
             with self.lock:
@@ -68,8 +69,9 @@ class AnalysisWorker(QThread):
                 if manual is None:
                     image, source_revision = self.source.grab()
                     frame_key = (hashlib.sha256(recognizer.signature(image) if hasattr(recognizer, 'signature') else image.tobytes()).digest(), source_revision, revision)
-                    if frame_key != last_frame_key:
+                    if frame_key != last_frame_key or getattr(recognizer,'always_analyze',False):
                         cached = recognizer.analyze(image)
+                        frame_key = (hashlib.sha256(recognizer.signature(image) if hasattr(recognizer,'signature') else image.tobytes()).digest(),source_revision,revision)
                         last_frame_key = frame_key
                     self.observed.emit(cached, source_revision)
                     state = stable.update(cached.state)
@@ -88,8 +90,12 @@ class AnalysisWorker(QThread):
                             texts *= state.opponents
                         if len(texts) != state.opponents:
                             raise ValueError("범위는 하나를 공통 적용하거나 ; 로 상대 수만큼 구분하세요.")
-                        result = estimate(state, [parse_range(t) for t in texts], iterations,
-                                          cancel=self.stop_event)
+                        equity_key=(state.hole,state.board,state.opponents,tuple(texts),iterations)
+                        if equity_key not in equity_cache:
+                            result=estimate(state,[parse_range(t) for t in texts],iterations,cancel=self.stop_event)
+                            if len(equity_cache)>=16:equity_cache.pop(next(iter(equity_cache)))
+                            equity_cache[equity_key]=result
+                        result=equity_cache[equity_key]
                         # Pixel sources can change even when settings do not:
                         # verify once more after a long Monte Carlo calculation.
                         current_frame = frame_key if manual is None else None

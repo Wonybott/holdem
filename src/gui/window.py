@@ -10,12 +10,14 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, Q
 from src.models.state import GameState, DECK, POSITIONS
 from src.capture.sources import MockSource, Region, WindowsMockCapture, load_image
 from src.capture.worker import AnalysisWorker
-from src.capture.desktop import DesktopRegionCapture, ReferenceCapture
+from src.capture.desktop import DesktopRegionCapture, ReferenceCapture, AutomaticMonitorCapture
+from src.vision.pokernow import PokerNowRecognizer
 from src.vision.screen import ScreenProfile, ScreenRecognizer
 from src.gui.calibration import CalibrationDialog
 from src.gui.mock_window import MockWindow
 from src.gui.dashboard import Dashboard
 from src.gui.theme import STYLE
+from src.gui.mini import MiniWindow
 from src.strategy.scenarios import pot_odds, call_ev, bet_scenarios
 
 
@@ -41,6 +43,9 @@ class MainWindow(QMainWindow):
         self.profile_path = Path(__file__).resolve().parents[2] / '.local' / 'screen-profile.json'
         self.profile = None
         self.reference = None
+        self.mini = MiniWindow(self)
+        self.mini.restore.connect(self.restore_main)
+        self.mini.stop.connect(self.stop_capture)
         self.next_step = 'start'
         self.recognition_errors = []
         root = QWidget()
@@ -57,12 +62,13 @@ class MainWindow(QMainWindow):
         layout.addLayout(header)
         controls = QHBoxLayout()
         self.mode = QComboBox()
-        self.mode.addItems(['자체 모의 화면', 'PokerNow / 실제 화면'])
+        self.mode.addItems(['자체 모의 화면', 'PokerNow 자동 인식 (보정 없음)', '직접 보정 (고급)'])
         self.mode.currentIndexChanged.connect(lambda _: self.stop_capture())
         controls.addWidget(self.mode, 1)
         self.start_button = self.button(controls, '분석 시작 / 재개', self.start_capture)
         self.start_button.setObjectName('primary')
         self.button(controls, '중지', self.stop_capture)
+        self.button(controls, '미니 보기', self.show_mini)
         layout.addLayout(controls)
         self.tabs = QTabWidget()
         self.play_page = QScrollArea(); self.play_page.setWidgetResizable(True)
@@ -75,20 +81,25 @@ class MainWindow(QMainWindow):
 
         settings = QWidget(); settings_layout = QVBoxLayout(settings)
         settings_layout.setSpacing(16)
-        hint = QLabel('실제 화면은 보정을 먼저 저장하세요. 준비가 되면 위의 분석 시작을 누르면 됩니다.')
+        hint = QLabel('자동 모드는 모니터 번호만 확인하고 위의 분석 시작을 누르세요. 직접 보정은 고급 모드에서만 사용합니다.')
         hint.setWordWrap(True); settings_layout.addWidget(hint)
-        screen_group = QGroupBox('1. 실제 화면 준비')
+        screen_group = QGroupBox('1. 화면 입력')
         screen_layout = QVBoxLayout(screen_group)
+        auto_hint=QLabel('자동 모드: PokerNow 창을 크게 띄우고 상단에서 분석 시작을 누르세요. 카드 정답·영역 등록이 필요 없습니다.')
+        auto_hint.setWordWrap(True); screen_layout.addWidget(auto_hint)
+        self.button(screen_layout,'PokerNow 사진 자동 읽기',self.open_auto_image)
         row = QHBoxLayout()
         row.addWidget(QLabel('캡처 모니터 번호'))
         self.monitor = QSpinBox(); self.monitor.setRange(1,16); row.addWidget(self.monitor); row.addStretch()
         screen_layout.addLayout(row)
+        optional=QLabel('아래 보정 기능은 직접 보정 (고급) 모드 전용이며, 자동 모드에는 필요하지 않습니다.')
+        optional.setWordWrap(True);screen_layout.addWidget(optional)
         self.button(screen_layout, '실제 화면 캡처·보정 (1.5초 뒤)', self.calibrate_live)
         row = QHBoxLayout()
         self.button(row, '스크린샷으로 보정', self.calibrate_file)
         self.button(row, '저장된 보정 불러오기', self.load_profile)
         screen_layout.addLayout(row)
-        self.profile_label = QLabel('아직 인식 보정이 없습니다. 테이블·카드·팟·콜 영역을 지정하세요.')
+        self.profile_label = QLabel('직접 보정은 선택 사항입니다. 자동 모드는 프로필·영역·정답 등록을 사용하지 않습니다.')
         self.profile_label.setWordWrap(True); screen_layout.addWidget(self.profile_label)
         settings_layout.addWidget(screen_group)
         mock_group = QGroupBox('모의 화면으로 시험하기')
@@ -162,6 +173,7 @@ class MainWindow(QMainWindow):
         self.pass_timer = QTimer(self); self.pass_timer.setSingleShot(True)
         self.pass_timer.timeout.connect(lambda: self.passthrough.setChecked(False))
         self.setStyleSheet(STYLE)
+        self.mini.setStyleSheet(STYLE)
         self.invalidate('중지됨 / 갱신 필요')
         self.stale_timer = QTimer(self)
         self.stale_timer.timeout.connect(self.check_stale); self.stale_timer.start(500)
@@ -189,7 +201,7 @@ class MainWindow(QMainWindow):
         self.next_step = 'settings'
         self.dashboard.next_button.setText('화면 설정 열기')
         self.dashboard.next_button.show()
-        if self.is_live() and self.profile is None and not self.manual_mode:
+        if self.is_live() and not self.is_auto() and self.profile is None and not self.manual_mode:
             self.dashboard.message('먼저 화면을 설정하세요',
                                    '화면 설정에서 저장된 보정을 불러오거나, 실제 테이블의 카드·팟·콜 영역을 지정하세요.',
                                    'caution','설정 필요')
@@ -210,7 +222,10 @@ class MainWindow(QMainWindow):
             self.next_step = 'start'; self.dashboard.next_button.setText('분석 다시 시작')
         elif '인식 실패' in message:
             errors='; '.join(self.recognition_errors)
-            if self.is_live() and 'OCR' in errors:
+            if self.is_auto():
+                self.dashboard.message('자동 인식을 확인하세요',errors or 'PokerNow 창을 크게 띄우고 카드·숫자·행동 버튼이 가려지지 않게 해 주세요.','caution','인식 실패')
+                self.dashboard.next_button.setText('모니터·자동 인식 확인')
+            elif self.is_live() and 'OCR' in errors:
                 self.dashboard.message('숫자 인식 실패',
                                        '화면 설정에서 팟·콜 영역에 숫자만 포함되도록 다시 지정하세요.',
                                        'caution','인식 실패')
@@ -224,6 +239,16 @@ class MainWindow(QMainWindow):
                 self.dashboard.message('화면을 읽지 못했습니다',instruction,'caution','인식 실패')
         else:
             self.dashboard.message('확인이 필요합니다',message,'caution')
+        self.mini.clear(self.dashboard.title.text(),self.dashboard.instruction.text())
+
+    def show_mini(self):
+        geometry=self.screen().availableGeometry()
+        self.mini.move(geometry.left()+8,geometry.top()+round(geometry.height()*.35))
+        self.mini.show()
+        self.showMinimized()
+
+    def restore_main(self):
+        self.mini.hide();self.showNormal();self.raise_();self.activateWindow()
 
     def perform_next_step(self):
         if self.next_step == 'start':
@@ -237,13 +262,15 @@ class MainWindow(QMainWindow):
         self.mock.activateWindow()
 
     def settings(self, manual=None):
-        self.accepted_revision = self.worker.configure(self.interval.value(), self.iterations.value(),
-                                                       self.ranges.text(), manual,
-                                                       ScreenRecognizer(self.profile) if self.is_live() and manual is None
-                                                       and self.profile is not None else None)
-        self.manual_mode = manual is not None
-        self.last_seen = 0
-        self.invalidate()
+        recognizer=None
+        if manual is None:
+            if self.is_auto():recognizer=PokerNowRecognizer()
+            elif self.is_live() and self.profile is not None:recognizer=ScreenRecognizer(self.profile)
+        self.accepted_revision = self.worker.configure(self.interval.value(),self.iterations.value(),
+                                                       self.ranges.text(),manual,recognizer)
+        self.manual_mode=manual is not None
+        self.last_seen=0
+        self.invalidate('계산 준비 / 갱신 필요')
 
     def apply_settings(self):
         try:
@@ -255,7 +282,11 @@ class MainWindow(QMainWindow):
         try:
             state, region, image, _, _ = self.source.snapshot()
             native = None
-            if self.is_live():
+            if self.is_auto():
+                native=AutomaticMonitorCapture(self.monitor.value())
+                region,image=Region(),None
+                self.region_label.setText('선택한 모니터의 PokerNow 테이블·카드·숫자를 자동으로 찾습니다.')
+            elif self.is_live():
                 if self.profile is None:
                     raise ValueError('실제 화면 캡처·보정 또는 저장된 보정 불러오기를 먼저 실행하세요.')
                 native = DesktopRegionCapture(self.profile)
@@ -269,6 +300,7 @@ class MainWindow(QMainWindow):
             self.settings()
             self.worker.launch()
             self.tabs.setCurrentWidget(self.play_page)
+            if self.is_auto():self.show_mini()
         except (ValueError, RuntimeError) as exc:
             self.error(exc)
 
@@ -352,7 +384,7 @@ class MainWindow(QMainWindow):
         self.hole.setText(" ".join(s.hole))
         self.board.setText(" ".join(s.board))
         self.pot.setText(str(s.pot))
-        self.call.setText(str(s.to_call))
+        self.call.setText(str(s.to_call) if s.to_call is not None else '')
         self.stacks.setText(" ".join(map(str, s.stacks)))
         self.opponents.setValue(s.opponents)
         self.position.setCurrentText(s.position)
@@ -387,29 +419,31 @@ class MainWindow(QMainWindow):
             return
         self.result_state = s
         self.last_seen = time.monotonic()
-        lines = [f"{'수동 입력' if self.manual_mode else ('실제 화면' if self.is_live() else '모의 화면')} · {s.street} · 위치 {s.position} · 상대 {s.opponents}",
+        call_text=f'{s.to_call:g}' if s.to_call is not None else '확인 필요'
+        lines = [f"{'수동 입력' if self.manual_mode else ('자동 화면' if self.is_auto() else '모의/보정 화면')} · {s.street} · 위치 {s.position} · 상대 {s.opponents}",
                  f"홀 {' '.join(s.hole)} | 보드 {' '.join(s.board) or '(없음)'}",
-                 f"팟 {s.pot:g} / 콜 {s.to_call:g} / 스택 {s.stacks}",
+                 f"팟 {s.pot:g} / 콜 {call_text} / 스택 {s.stacks}",
                  f"단독 승리 {result.win:.2%} · 무승부 발생 {result.tie:.2%}",
                  f"예상 팟 지분 {result.equity:.2%} (무승부 분배 포함)",
-                 f"MC 표준오차 {result.standard_error:.2%} · {result.samples}회 · 범위 {self.ranges.text()}",
-                 f"팟 오즈 / 콜 손익분기 지분 {pot_odds(s.pot, s.to_call):.2%}",
-                 f"추가 베팅 없는 쇼다운 가정 {'콜' if s.to_call else '체크'} EV {call_ev(result.equity, s.pot, s.to_call):+.2f}",
-                 "폴드 EV 0 (현재 결정 이후, 이전 투자 제외)",
-                 ("콜 금액 0 → 체크 가능。" if not s.to_call else "콜 또는 폴드 여부 검토 필요. ") + "상대 모델 부재로 행동 확정 추천 보류."]
-        if s.to_call:
-            lines.append("콜이 필요한 상태: 체크/신규 베팅 시나리오 적용 불가. 레이즈 합법 최소액/이력 미인식.")
+                 f"MC 표준오차 {result.standard_error:.2%} · {result.samples}회 · 범위 {self.ranges.text()}"]
+        if s.to_call is not None:
+            lines += [f'팟 오즈 / 콜 손익분기 지분 {pot_odds(s.pot,s.to_call):.2%}',
+                      f'추가 베팅 없는 쇼다운 가정 EV {call_ev(result.equity,s.pot,s.to_call):+.2f}']
         else:
-            lines.append("신규 베팅 비교: 상대 유효 스택 한도 적용, 레이즈 추천 아님")
-            for b in bet_scenarios(s.pot, min(s.stacks)):
-                lines.append(f"팟 {b.fraction:.0%}: {b.amount:g}칩 / 순수 블러프 손익분기 전체 폴드 {b.pure_bluff_break_even:.1%} / EV 미상")
-        lines += ["콜 EV는 사이드 팟·레이크·미래 베팅 미반영. 승률 범위 가정에 민감합니다.",
-                  "행동/베팅 이력: 인식 미지원. 포지션은 모의 화면/수동 입력값."]
-        if self.is_live() and not self.manual_mode:
-            lines.append('상대 수·포지션: 보정 시 수동 가정. 스택도 영역 미지정이면 수동 가정. 실제 값이 바뀌면 다시 보정하세요.')
+            lines.append('콜 금액 미확인: 팟 오즈·행동 EV 계산 보류')
+        if s.hero_turn is False:lines.append('상대 차례: 행동 판단 대기')
+        elif s.hero_turn is None:lines.append('내 차례 여부 미확인: 행동 판단 보류')
+        if s.to_call==0 and s.hero_turn is True:
+            for b in bet_scenarios(s.pot,min(s.stacks)):
+                lines.append(f'팟 {b.fraction:.0%}: {b.amount:g}칩 / 순수 블러프 손익분기 전체 폴드 {b.pure_bluff_break_even:.1%} / EV 미상')
+        lines += ['사이드 팟·레이크·미래 베팅 미반영. 상대 범위 가정에 민감합니다.',
+                  '이전 행동 이력 미지원. 내 차례와 활성 버튼이 확인될 때만 행동을 검토합니다.']
+        if self.is_live() and not self.is_auto() and not self.manual_mode:
+            lines.append('직접 보정 모드의 상대 수·포지션·영역 미지정 스택은 수동 가정입니다.')
         self.output.setPlainText("\n".join(lines))
-        source = '수동 입력' if self.manual_mode else ('실제 화면' if self.is_live() else '모의 화면')
-        self.dashboard.show_result(s,result,source,self.ranges.text(),self.is_live() and not self.manual_mode)
+        source = '수동 입력' if self.manual_mode else ('자동 인식' if self.is_auto() else ('직접 보정' if self.is_live() else '모의 화면'))
+        self.dashboard.show_result(s,result,source,self.ranges.text(),self.is_live() and not self.is_auto() and not self.manual_mode)
+        self.mini.show_result(s,result)
         self.status_label.setText("수동 입력 분석 완료" if self.manual_mode else "분석 갱신 완료")
 
     def check_stale(self):
@@ -420,8 +454,23 @@ class MainWindow(QMainWindow):
             age=max(0,round(time.monotonic()-self.last_seen))
             self.dashboard.freshness.setText('방금 갱신' if age==0 else f'{age}초 전 확인')
 
+    def is_auto(self):
+        return self.mode.currentIndex()==1
+
     def is_live(self):
-        return self.mode.currentIndex() == 1
+        return self.mode.currentIndex()!=0
+
+    def open_auto_image(self):
+        path,_=QFileDialog.getOpenFileName(self,'PokerNow 화면 사진 자동 읽기','','Images (*.png *.jpg *.bmp)')
+        if path:
+            try:
+                self.stop_capture()
+                self.mode.setCurrentIndex(1)
+                self.source.configure(file_image=load_image(path),region=Region())
+                self.settings()
+                self.worker.launch()
+                self.tabs.setCurrentWidget(self.play_page)
+            except (ValueError,OSError) as exc:self.error(exc)
 
     def calibrate_live(self):
         if sys.platform != 'win32':
@@ -471,7 +520,7 @@ class MainWindow(QMainWindow):
             try:
                 dialog.profile.save(self.profile_path)
                 self.profile = dialog.profile
-                self.mode.setCurrentIndex(1)
+                self.mode.setCurrentIndex(2)
                 self.profile_label.setText(f'실제 화면 보정 저장됨: {self.profile_path} · 등록 카드/빈칸 {len(self.profile.samples)}종. 새 카드는 추가 보정 필요.')
                 self.invalidate('보정 완료. Tesseract를 설치한 뒤 시작을 누르세요.')
             except (ValueError,OSError) as exc:
@@ -480,7 +529,7 @@ class MainWindow(QMainWindow):
     def load_profile(self):
         try:
             self.profile = ScreenProfile.load(self.profile_path)
-            self.mode.setCurrentIndex(1)
+            self.mode.setCurrentIndex(2)
             self.profile_label.setText(f'보정 불러옴: {self.profile_path} · {len(self.profile.samples)}종 카드/빈칸')
         except (ValueError,OSError,TypeError,KeyError) as exc:
             self.error(ValueError(f'보정을 불러오지 못했습니다. 먼저 실제 화면 캡처·보정을 실행하세요. ({exc})'))
@@ -517,4 +566,5 @@ class MainWindow(QMainWindow):
             event.ignore()
         else:
             self.mock.close()
+            self.mini.close()
             event.accept()

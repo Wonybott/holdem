@@ -42,7 +42,7 @@ def test_real_screen_errors_keep_specific_recovery_when_status_follows(app):
     window=MainWindow()
     try:
         window.profile=object()  # No OCR needed to present a failed observation.
-        window.mode.setCurrentIndex(1)
+        window.mode.setCurrentIndex(2)
         window.worker.stop_event.clear()
         window.on_observed(Observation(errors=['card0: 카드 인식 실패']),window.source.revision)
         window.on_status('인식 실패 / 갱신 필요')
@@ -56,7 +56,7 @@ def test_real_screen_errors_keep_specific_recovery_when_status_follows(app):
 def test_missing_profile_tells_user_which_tab_to_open(app):
     window=MainWindow()
     try:
-        window.mode.setCurrentIndex(1)
+        window.mode.setCurrentIndex(2)
         assert window.dashboard.title.text()=='먼저 화면을 설정하세요'
         window.dashboard.next_button.click()
         assert window.tabs.currentWidget()==window.settings_page
@@ -93,3 +93,28 @@ def test_closing_window_stops_ui_timers(app):
     window.close()
     assert not window.stale_timer.isActive()
     assert not window.pass_timer.isActive()
+
+
+def test_automatic_mode_starts_without_a_profile(app):
+    window=MainWindow()
+    try:
+        window.mode.setCurrentIndex(1)
+        assert window.is_auto()
+        assert window.profile is None
+        assert window.dashboard.title.text()=='분석을 시작하세요'
+    finally:window.close()
+
+
+def test_unknown_call_does_not_show_check_or_zero_cost(app):
+    window=MainWindow()
+    try:
+        state=replace(window.source.state,to_call=None,hero_turn=False)
+        publish(window,state)
+        assert window.dashboard.title.text()=='상대 차례입니다'
+        assert window.dashboard.required.value.text()=='—'
+        assert window.dashboard.ev.value.text()=='—'
+        assert not window.dashboard.amount.text()
+        assert window.mini.title.text()=='상대 차례입니다'
+        window.stop_capture()
+        assert not window.mini.cards.text()
+    finally:window.close()

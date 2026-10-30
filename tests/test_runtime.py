@@ -143,3 +143,24 @@ def test_changed_pixels_during_mc_never_publish_old_result(app):
         assert all(r[0].pot==777 for r in results)
     finally:
         w.stop(); assert w.wait(3000)
+
+
+def test_equity_is_reused_for_price_changes_but_not_new_cards(app,monkeypatch):
+    import src.capture.worker as module
+    original=module.estimate; calls=[]
+    def count(state,*args,**kwargs):
+        calls.append(state)
+        return original(state,*args,**kwargs)
+    monkeypatch.setattr(module,'estimate',count)
+    source=MockSource();w=AnalysisWorker(source);outputs=[]
+    w.configure(100,100)
+    w.analyzed.connect(lambda *args:outputs.append(args))
+    try:
+        w.launch();until(app,lambda:len(outputs)>=1)
+        source.configure(state=replace(source.state,pot=500,to_call=50))
+        until(app,lambda:len(outputs)>=2)
+        assert len(calls)==1
+        source.configure(state=replace(source.state,hole=('Ah','Kd')))
+        until(app,lambda:len(outputs)>=3)
+        assert len(calls)==2
+    finally:w.stop();assert w.wait(3000)

@@ -7,8 +7,9 @@ if __package__ in (None, ""):
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="자체 모의 화면 전용 Hold'em Analyzer")
+    parser = argparse.ArgumentParser(description="픽셀 기반 Hold'em Analyzer")
     parser.add_argument("--analyze", metavar="IMAGE", help="GUI 없이 모의 이미지를 분석")
+    parser.add_argument("--pokernow",action="store_true",help="--analyze 이미지를 보정 없이 PokerNow 자동 판독")
     parser.add_argument("--iterations", type=int, default=3000)
     parser.add_argument("--range", default="random", dest="range_text")
     args = parser.parse_args()
@@ -20,7 +21,9 @@ def main():
         from src.poker.equity import estimate, parse_range
         from src.strategy.scenarios import pot_odds, call_ev
         try:
-            observation = MockRecognizer().analyze(load_image(args.analyze))
+            from src.vision.pokernow import PokerNowRecognizer
+            recognizer=PokerNowRecognizer() if args.pokernow else MockRecognizer()
+            observation = recognizer.analyze(load_image(args.analyze))
             if observation.state is None:
                 print(json.dumps({"errors": observation.errors}, ensure_ascii=False))
                 return 2
@@ -28,8 +31,8 @@ def main():
             equity = estimate(state, [parse_range(args.range_text)] * state.opponents,
                               args.iterations, seed=42)
             print(json.dumps({"state": asdict(state), "equity": asdict(equity),
-                              "pot_odds": pot_odds(state.pot, state.to_call),
-                              "showdown_call_ev": call_ev(equity.equity, state.pot, state.to_call),
+                              "pot_odds": pot_odds(state.pot, state.to_call) if state.to_call is not None else None,
+                              "showdown_call_ev": call_ev(equity.equity, state.pot, state.to_call) if state.to_call is not None else None,
                               "confidence": observation.confidence}, ensure_ascii=False, indent=2))
             return 0
         except (ValueError, OSError) as exc:
@@ -40,6 +43,7 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Holdem Vision Analyzer")
     window = MainWindow()
+    if sys.platform=='win32':window.mode.setCurrentIndex(1)
     window.show()
     return app.exec()
 

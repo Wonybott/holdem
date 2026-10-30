@@ -115,14 +115,23 @@ class Dashboard(QWidget):
         self.next_button.hide()
         self.hero.set_cards(state.hole); self.board.set_cards(state.board)
         streets={'Preflop':'프리플롭','Flop':'플롭','Turn':'턴','River':'리버'}
+        call_text=f'{state.to_call:g}칩' if state.to_call is not None else '확인 필요'
         self.context.setText(f'{source} · {streets[state.street]} · 상대 {state.opponents}명 · 위치 {state.position}'
-                             f' · 팟 {state.pot:g}칩 · 콜 {state.to_call:g}칩 · 내 스택 {state.stacks[0]:g}칩')
+                             f' · 팟 {state.pot:g}칩 · 콜 {call_text} · 내 스택 {state.stacks[0]:g}칩')
         self.equity.set(f'{result.equity:.1%}',f'단독 승리 {result.win:.1%} · 무승부 {result.tie:.1%}')
-        self.required.set(f'{pot_odds(state.pot,state.to_call):.1%}',f'콜 비용 {state.to_call:g}칩')
-        self.ev.caption.setText('콜 EV · 쇼다운 가정' if state.to_call else '체크 EV · 쇼다운 가정')
-        self.ev.set(f'{call_ev(result.equity,state.pot,state.to_call):+.1f}칩',f'상대 범위: {ranges}')
+        if state.to_call is None:
+            self.required.set('—','콜 금액 확인 필요')
+            self.ev.caption.setText('행동 EV')
+            self.ev.set('—','콜 금액이 없어 계산 보류')
+        else:
+            self.required.set(f'{pot_odds(state.pot,state.to_call):.1%}',f'콜 비용 {state.to_call:g}칩')
+            self.ev.caption.setText('콜 EV · 쇼다운 가정' if state.to_call else '체크 EV · 쇼다운 가정')
+            self.ev.set(f'{call_ev(result.equity,state.pot,state.to_call):+.1f}칩',f'상대 범위: {ranges}')
         self.freshness.setText('수동 입력 결과' if source=='수동 입력' else '방금 갱신')
-        if state.to_call:
+        if state.to_call is None or state.hero_turn is not True:
+            self.scenario_label.setText('내 차례와 콜 금액이 확인되면 행동·금액을 다시 분석합니다.')
+            self.scenarios.hide()
+        elif state.to_call:
             self.scenario_label.setText('콜이 필요한 상태입니다. 합법 레이즈 최소액을 모르므로 레이즈 금액 판단을 보류합니다.')
             self.scenarios.hide()
         else:
