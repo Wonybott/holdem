@@ -1,0 +1,95 @@
+from dataclasses import replace
+from src.gui.window import MainWindow
+from src.poker.equity import EquityResult
+from src.vision.recognizer import Observation
+
+
+def publish(window,state=None,equity=.5,error=.008):
+    state=state or window.source.state
+    window.on_analyzed(state,EquityResult(equity,0,equity,3000,error),
+                       window.accepted_revision,window.source.revision)
+
+
+def test_primary_view_shows_action_and_amount_without_opening_settings(app):
+    window=MainWindow(); window.show(); app.processEvents()
+    try:
+        publish(window)
+        assert window.tabs.currentWidget()==window.play_page
+        assert window.dashboard.title.text()=='콜 검토'
+        assert window.dashboard.amount.text()=='콜 20칩'
+        assert window.dashboard.title.isVisible()
+        assert not window.settings_page.isVisible()
+        assert window.dashboard.hero.cards[0].text()=='A♠'
+        assert window.dashboard.equity.value.text()=='50.0%'
+    finally: window.close()
+
+
+def test_stale_result_and_capture_failure_remove_action_and_money(app):
+    window=MainWindow()
+    try:
+        publish(window)
+        window.on_observed(Observation(errors=['bad frame']),window.source.revision)
+        assert window.result_state is None
+        assert window.dashboard.title.text()=='화면을 읽지 못했습니다'
+        assert window.dashboard.equity.value.text()=='—'
+        assert window.dashboard.hero.cards[0].text()=='—'
+        assert not window.dashboard.amount.text()
+        assert not window.output.toPlainText()
+    finally: window.close()
+
+
+def test_real_screen_errors_keep_specific_recovery_when_status_follows(app):
+    window=MainWindow()
+    try:
+        window.profile=object()  # No OCR needed to present a failed observation.
+        window.mode.setCurrentIndex(1)
+        window.worker.stop_event.clear()
+        window.on_observed(Observation(errors=['card0: 카드 인식 실패']),window.source.revision)
+        window.on_status('인식 실패 / 갱신 필요')
+        assert window.dashboard.title.text()=='카드 인식 실패'
+        assert '샘플' in window.dashboard.instruction.text()
+        window.dashboard.next_button.click()
+        assert window.tabs.currentWidget()==window.settings_page
+    finally: window.close()
+
+
+def test_missing_profile_tells_user_which_tab_to_open(app):
+    window=MainWindow()
+    try:
+        window.mode.setCurrentIndex(1)
+        assert window.dashboard.title.text()=='먼저 화면을 설정하세요'
+        window.dashboard.next_button.click()
+        assert window.tabs.currentWidget()==window.settings_page
+    finally: window.close()
+
+
+def test_check_uses_zero_amount_and_keeps_bet_ev_unknown(app):
+    window=MainWindow()
+    try:
+        publish(window,replace(window.source.state,to_call=0))
+        assert window.dashboard.title.text()=='체크 가능'
+        assert window.dashboard.amount.text()=='추가 금액 0칩'
+        assert '체크 EV' in window.dashboard.ev.caption.text()
+        assert window.dashboard.scenarios.rowCount()==4
+        assert all(window.dashboard.scenarios.item(i,2).text()=='미상' for i in range(4))
+    finally: window.close()
+
+
+def test_stopping_removes_previously_displayed_decision(app):
+    window=MainWindow()
+    try:
+        publish(window,equity=.05)
+        assert window.dashboard.title.text()=='폴드 검토'
+        window.stop_capture()
+        assert window.dashboard.title.text()=='분석을 시작하세요'
+        assert window.dashboard.required.value.text()=='—'
+    finally: window.close()
+
+
+def test_closing_window_stops_ui_timers(app):
+    window=MainWindow()
+    window.pass_timer.start(10000)
+    assert window.stale_timer.isActive()
+    window.close()
+    assert not window.stale_timer.isActive()
+    assert not window.pass_timer.isActive()

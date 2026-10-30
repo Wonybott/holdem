@@ -6,7 +6,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
                                QPushButton, QLabel, QLineEdit, QSpinBox, QCheckBox,
-                               QComboBox, QPlainTextEdit, QFileDialog, QMessageBox, QScrollArea)
+                               QComboBox, QPlainTextEdit, QFileDialog, QMessageBox, QScrollArea, QTabWidget, QGroupBox)
 from src.models.state import GameState, DECK, POSITIONS
 from src.capture.sources import MockSource, Region, WindowsMockCapture, load_image
 from src.capture.worker import AnalysisWorker
@@ -14,6 +14,8 @@ from src.capture.desktop import DesktopRegionCapture, ReferenceCapture
 from src.vision.screen import ScreenProfile, ScreenRecognizer
 from src.gui.calibration import CalibrationDialog
 from src.gui.mock_window import MockWindow
+from src.gui.dashboard import Dashboard
+from src.gui.theme import STYLE
 from src.strategy.scenarios import pot_odds, call_ev, bet_scenarios
 
 
@@ -21,7 +23,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Texas Hold'em Vision Analyzer")
-        self.resize(820, 900)
+        self.resize(940, 940)
+        self.setMinimumSize(720, 650)
         self.source = MockSource()
         self.mock = MockWindow(self.source.state)
         self.mock.region_selected.connect(self.set_region)
@@ -38,119 +41,135 @@ class MainWindow(QMainWindow):
         self.profile_path = Path(__file__).resolve().parents[2] / '.local' / 'screen-profile.json'
         self.profile = None
         self.reference = None
-        body = QWidget()
-        layout = QVBoxLayout(body)
-        banner = QLabel("선택한 화면의 픽셀만 분석 · 자동 클릭/베팅 없음\n승률은 가정한 범위에 대한 추정값이며 확정 행동 추천이 아닙니다.")
-        banner.setWordWrap(True)
-        layout.addWidget(banner)
-        mode_row = QHBoxLayout()
+        self.next_step = 'start'
+        self.recognition_errors = []
+        root = QWidget()
+        layout = QVBoxLayout(root)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(12)
+        header = QHBoxLayout()
+        title = QLabel("HOLD'EM VISION"); title.setObjectName('appTitle')
+        header.addWidget(title); header.addStretch()
+        self.status_label = QLabel('중지됨 / 갱신 필요')
+        self.status_label.setObjectName('statusPill')
+        self.status_label.setWordWrap(True); self.status_label.setMaximumWidth(440)
+        header.addWidget(self.status_label)
+        layout.addLayout(header)
+        controls = QHBoxLayout()
         self.mode = QComboBox()
-        self.mode.addItems(['자체 모의 화면', 'PokerNow / 실제 화면 (보정 필요)'])
+        self.mode.addItems(['자체 모의 화면', 'PokerNow / 실제 화면'])
         self.mode.currentIndexChanged.connect(lambda _: self.stop_capture())
-        mode_row.addWidget(self.mode)
-        mode_row.addWidget(QLabel('캡처 모니터 번호'))
-        self.monitor = QSpinBox()
-        self.monitor.setRange(1,16)
-        mode_row.addWidget(self.monitor)
-        layout.addLayout(mode_row)
-        setup_row = QHBoxLayout()
-        self.button(setup_row, '실제 화면 캡처·보정 (1.5초 뒤)', self.calibrate_live)
-        self.button(setup_row, '스크린샷으로 보정', self.calibrate_file)
-        self.button(setup_row, '저장된 보정 불러오기', self.load_profile)
-        layout.addLayout(setup_row)
-        self.profile_label = QLabel('실제 화면: 아직 인식 보정이 없습니다. 시작 전 테이블·카드·팟·콜을 지정하세요.')
-        self.profile_label.setWordWrap(True)
-        layout.addWidget(self.profile_label)
+        controls.addWidget(self.mode, 1)
+        self.start_button = self.button(controls, '분석 시작 / 재개', self.start_capture)
+        self.start_button.setObjectName('primary')
+        self.button(controls, '중지', self.stop_capture)
+        layout.addLayout(controls)
+        self.tabs = QTabWidget()
+        self.play_page = QScrollArea(); self.play_page.setWidgetResizable(True)
+        self.dashboard = Dashboard()
+        self.dashboard.next_button.clicked.connect(self.perform_next_step)
+        self.play_page.setWidget(self.dashboard)
+        self.tabs.addTab(self.play_page, '플레이 보기')
+        layout.addWidget(self.tabs, 1)
+        self.setCentralWidget(root)
+
+        settings = QWidget(); settings_layout = QVBoxLayout(settings)
+        settings_layout.setSpacing(16)
+        hint = QLabel('실제 화면은 보정을 먼저 저장하세요. 준비가 되면 위의 분석 시작을 누르면 됩니다.')
+        hint.setWordWrap(True); settings_layout.addWidget(hint)
+        screen_group = QGroupBox('1. 실제 화면 준비')
+        screen_layout = QVBoxLayout(screen_group)
         row = QHBoxLayout()
-        self.button(row, "모의 창", self.show_mock)
-        self.button(row, "새 모의 패", self.deal)
-        self.button(row, "테스트 이미지 열기", self.open_image)
-        layout.addLayout(row)
+        row.addWidget(QLabel('캡처 모니터 번호'))
+        self.monitor = QSpinBox(); self.monitor.setRange(1,16); row.addWidget(self.monitor); row.addStretch()
+        screen_layout.addLayout(row)
+        self.button(screen_layout, '실제 화면 캡처·보정 (1.5초 뒤)', self.calibrate_live)
         row = QHBoxLayout()
-        self.button(row, "시작 / 캡처 재개", self.start_capture)
-        self.button(row, "중지", self.stop_capture)
-        self.button(row, "모의 창 영역 선택", self.select_region)
-        self.button(row, "영역 전체로 복원", lambda: self.set_region(Region()))
-        layout.addLayout(row)
-        self.native = QCheckBox("Windows mss로 자체 모의 창 캡처 (맨 앞에 표시 필요)")
-        self.native.setEnabled(sys.platform == "win32")
+        self.button(row, '스크린샷으로 보정', self.calibrate_file)
+        self.button(row, '저장된 보정 불러오기', self.load_profile)
+        screen_layout.addLayout(row)
+        self.profile_label = QLabel('아직 인식 보정이 없습니다. 테이블·카드·팟·콜 영역을 지정하세요.')
+        self.profile_label.setWordWrap(True); screen_layout.addWidget(self.profile_label)
+        settings_layout.addWidget(screen_group)
+        mock_group = QGroupBox('모의 화면으로 시험하기')
+        mock_layout = QVBoxLayout(mock_group)
+        row = QHBoxLayout()
+        self.button(row, '모의 창', self.show_mock)
+        self.button(row, '새 모의 패', self.deal)
+        self.button(row, '테스트 이미지 열기', self.open_image)
+        mock_layout.addLayout(row)
+        row = QHBoxLayout()
+        self.button(row, '모의 창 영역 선택', self.select_region)
+        self.button(row, '영역 전체로 복원', lambda: self.set_region(Region()))
+        mock_layout.addLayout(row)
+        self.native = QCheckBox('Windows mss로 자체 모의 창 캡처 (맨 앞에 표시 필요)')
+        self.native.setEnabled(sys.platform == 'win32')
         self.native.toggled.connect(lambda _: self.stop_capture())
-        layout.addWidget(self.native)
-        self.region_label = QLabel("영역: 모의 화면 전체 (안정적인 인식을 위해 전체 권장)")
-        layout.addWidget(self.region_label)
-        form = QFormLayout()
-        self.interval = QSpinBox()
-        self.interval.setRange(100, 5000)
-        self.interval.setValue(1000)
-        self.interval.setSuffix(" ms")
-        form.addRow("캡처 간격", self.interval)
-        self.iterations = QSpinBox()
-        self.iterations.setRange(100, 50000)
-        self.iterations.setValue(3000)
-        form.addRow("Monte Carlo 표본 수", self.iterations)
-        self.ranges = QLineEdit("random")
-        self.ranges.setPlaceholderText("random 또는 AA,AKs / 상대별 구분 ;")
-        form.addRow("상대 범위 (공통 또는 ; 구분)", self.ranges)
-        self.button(form, "분석 설정 적용", self.apply_settings)
-        layout.addLayout(form)
-        options = QHBoxLayout()
-        self.top = QCheckBox("항상 위")
-        self.top.toggled.connect(self.toggle_top)
-        options.addWidget(self.top)
-        self.passthrough = QCheckBox("클릭 통과 (10초 후 자동 해제)")
-        self.passthrough.toggled.connect(self.toggle_passthrough)
-        options.addWidget(self.passthrough)
-        layout.addLayout(options)
-        self.pass_timer = QTimer(self)
-        self.pass_timer.setSingleShot(True)
-        self.pass_timer.timeout.connect(lambda: self.passthrough.setChecked(False))
-        self.status_label = QLabel("중지됨 / 갱신 필요")
-        self.confidence_label = QLabel("인식 결과 없음")
-        self.confidence_label.setWordWrap(True)
-        layout.addWidget(self.status_label)
-        layout.addWidget(self.confidence_label)
-        self.output = QPlainTextEdit()
-        self.output.setReadOnly(True)
-        self.output.setMinimumHeight(220)
-        layout.addWidget(self.output)
-        layout.addWidget(QLabel("인식 결과 수정 / 수동 분석 (자동 캡처 입력 대신 사용)"))
+        mock_layout.addWidget(self.native)
+        self.region_label = QLabel('영역: 모의 화면 전체'); self.region_label.setWordWrap(True)
+        mock_layout.addWidget(self.region_label)
+        settings_layout.addWidget(mock_group)
+        analysis_group = QGroupBox('2. 분석 설정')
+        form = QFormLayout(analysis_group)
+        self.interval = QSpinBox(); self.interval.setRange(100,5000)
+        self.interval.setValue(1000); self.interval.setSuffix(' ms')
+        form.addRow('캡처 간격 (1000ms = 1초)', self.interval)
+        self.iterations = QSpinBox(); self.iterations.setRange(100,50000); self.iterations.setValue(3000)
+        form.addRow('시뮬레이션 표본 수', self.iterations)
+        self.ranges = QLineEdit('random')
+        self.ranges.setPlaceholderText('random 또는 AA,AKs / 상대별 구분 ;')
+        form.addRow('상대 범위', self.ranges)
+        self.button(form, '분석 설정 적용', self.apply_settings)
+        settings_layout.addWidget(analysis_group)
+        display_group = QGroupBox('표시 옵션')
+        display_layout = QVBoxLayout(display_group)
+        self.top = QCheckBox('항상 위에 표시'); self.top.toggled.connect(self.toggle_top)
+        display_layout.addWidget(self.top)
+        self.passthrough = QCheckBox('클릭 통과 (10초 후 자동 해제)')
+        self.passthrough.toggled.connect(self.toggle_passthrough); display_layout.addWidget(self.passthrough)
+        settings_layout.addWidget(display_group)
+        settings_layout.addStretch()
+        self.settings_page = self.scroll_page(settings)
+        self.tabs.addTab(self.settings_page, '화면 설정')
+
+        manual = QWidget(); manual_layout = QVBoxLayout(manual)
+        hint = QLabel('① 마지막 인식값 가져오기 → ② 잘못 읽힌 값 수정 → ③ 수정값 수동 분석\n카드 예시: As Kh / Qs Jh 2c. 스택은 나 먼저, 상대 수+1개 입력하세요.')
+        hint.setWordWrap(True); manual_layout.addWidget(hint)
         edits = QFormLayout()
-        self.hole = QLineEdit("As Kh")
-        self.board = QLineEdit("Qs Jh 2c")
-        self.pot = QLineEdit("120")
-        self.call = QLineEdit("20")
-        self.stacks = QLineEdit("1000 1000 1000")
-        self.opponents = QSpinBox()
-        self.opponents.setRange(1, 8)
-        self.opponents.setValue(2)
-        self.position = QComboBox()
-        self.position.addItems(POSITIONS)
-        self.position.setCurrentText("BTN")
-        for text, widget in (("홀 카드", self.hole), ("보드 (프리플롭은 비움)", self.board),
-                             ("팟 (내 콜 이전, 상대 베팅 포함)", self.pot), ("내 유효 콜 금액", self.call),
-                             ("스택 (나, 상대 순서)", self.stacks), ("상대 수", self.opponents),
-                             ("포지션", self.position)):
-            edits.addRow(text, widget)
-        layout.addLayout(edits)
-        row = QHBoxLayout()
-        self.button(row, "마지막 인식값 가져오기", self.copy_recognized)
-        self.button(row, "수정값 수동 분석", self.analyze_manual)
-        self.button(row, "수정값을 모의 창에 적용", self.update_mock)
-        layout.addLayout(row)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(body)
-        self.setCentralWidget(scroll)
-        self.setStyleSheet("""
-            QWidget { background:#18212b; color:#e5edf5; font-size:13px; }
-            QLineEdit, QSpinBox, QComboBox, QPlainTextEdit { background:#0c151f; padding:5px; }
-            QPushButton { background:#254358; padding:7px; border-radius:4px; }
-            QPushButton:hover { background:#36617d; }
-            QPushButton:disabled { color:#728090; }
-        """)
+        self.hole = QLineEdit('As Kh'); self.board = QLineEdit('Qs Jh 2c')
+        self.pot = QLineEdit('120'); self.call = QLineEdit('20')
+        self.stacks = QLineEdit('1000 1000 1000')
+        self.opponents = QSpinBox(); self.opponents.setRange(1,8); self.opponents.setValue(2)
+        self.position = QComboBox(); self.position.addItems(POSITIONS); self.position.setCurrentText('BTN')
+        for text, widget in (('홀 카드',self.hole),('보드 (프리플롭은 비움)',self.board),
+                             ('팟 (내 콜 이전, 상대 베팅 포함)',self.pot),('내 유효 콜 금액',self.call),
+                             ('스택 (나, 상대 순서)',self.stacks),('상대 수',self.opponents),('포지션',self.position)):
+            edits.addRow(text,widget)
+        manual_layout.addLayout(edits)
+        self.button(manual_layout, '마지막 인식값 가져오기', self.copy_recognized)
+        b = self.button(manual_layout, '수정값 수동 분석', self.analyze_manual); b.setObjectName('primary')
+        self.button(manual_layout, '수정값을 모의 창에 적용', self.update_mock)
+        manual_layout.addStretch()
+        self.manual_page = self.scroll_page(manual)
+        self.tabs.addTab(self.manual_page, '수동 수정')
+
+        details = QWidget(); detail_layout = QVBoxLayout(details)
+        self.confidence_label = QLabel('인식 결과 없음'); self.confidence_label.setWordWrap(True)
+        detail_layout.addWidget(self.confidence_label)
+        self.output = QPlainTextEdit(); self.output.setReadOnly(True); self.output.setMinimumHeight(220)
+        detail_layout.addWidget(self.output, 1)
+        self.tabs.addTab(details, '분석 상세')
+        self.pass_timer = QTimer(self); self.pass_timer.setSingleShot(True)
+        self.pass_timer.timeout.connect(lambda: self.passthrough.setChecked(False))
+        self.setStyleSheet(STYLE)
+        self.invalidate('중지됨 / 갱신 필요')
         self.stale_timer = QTimer(self)
-        self.stale_timer.timeout.connect(self.check_stale)
-        self.stale_timer.start(500)
+        self.stale_timer.timeout.connect(self.check_stale); self.stale_timer.start(500)
+
+    @staticmethod
+    def scroll_page(widget):
+        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(widget)
+        return scroll
 
     @staticmethod
     def button(layout, text, callback):
@@ -165,7 +184,52 @@ class MainWindow(QMainWindow):
     def invalidate(self, message="갱신 필요"):
         self.result_state = None
         self.output.clear()
+        self.dashboard.clear()
         self.status_label.setText(message)
+        self.next_step = 'settings'
+        self.dashboard.next_button.setText('화면 설정 열기')
+        self.dashboard.next_button.show()
+        if self.is_live() and self.profile is None and not self.manual_mode:
+            self.dashboard.message('먼저 화면을 설정하세요',
+                                   '화면 설정에서 저장된 보정을 불러오거나, 실제 테이블의 카드·팟·콜 영역을 지정하세요.',
+                                   'caution','설정 필요')
+        elif 'Tesseract' in message:
+            self.dashboard.message('Tesseract 설치를 확인하세요',message,'caution','설정 필요')
+        elif '중지' in message:
+            self.dashboard.message('분석을 시작하세요',
+                                   '분석 시작 / 재개를 누르면 현재 화면을 읽고 검토할 행동과 금액을 표시합니다.',badge='중지됨')
+            self.next_step = 'start'; self.dashboard.next_button.setText('분석 시작 / 재개')
+        elif '계산' in message or '안정화' in message or '화면 변경' in message or '새 화면' in message:
+            self.dashboard.message('새 결과를 기다려 주세요',
+                                   '같은 상태를 두 프레임에서 확인하고 계산합니다. 이전 결과는 표시하지 않습니다.',badge='분석 중')
+            self.dashboard.next_button.hide()
+        elif '최신 화면 없음' in message:
+            self.dashboard.message('화면을 다시 확인하세요',
+                                   '최신 화면을 읽지 못했습니다. 테이블이 가려지지 않았는지 확인하고 분석을 재개하세요.',
+                                   'caution','오래된 결과')
+            self.next_step = 'start'; self.dashboard.next_button.setText('분석 다시 시작')
+        elif '인식 실패' in message:
+            errors='; '.join(self.recognition_errors)
+            if self.is_live() and 'OCR' in errors:
+                self.dashboard.message('숫자 인식 실패',
+                                       '화면 설정에서 팟·콜 영역에 숫자만 포함되도록 다시 지정하세요.',
+                                       'caution','인식 실패')
+            elif self.is_live() and 'card' in errors:
+                self.dashboard.message('카드 인식 실패',
+                                       '화면 설정에서 현재 보이는 카드의 정답 샘플을 추가하세요.',
+                                       'caution','인식 실패')
+            else:
+                instruction = ('화면 설정에서 카드 샘플과 숫자 영역을 확인하세요. 잘못 읽힌 값은 수동 수정에서 고칠 수 있습니다.'
+                               if self.is_live() else '모의 화면 전체가 선택됐는지 확인하세요. 잘린 영역은 화면 설정에서 전체로 복원하세요.')
+                self.dashboard.message('화면을 읽지 못했습니다',instruction,'caution','인식 실패')
+        else:
+            self.dashboard.message('확인이 필요합니다',message,'caution')
+
+    def perform_next_step(self):
+        if self.next_step == 'start':
+            self.start_capture()
+        else:
+            self.tabs.setCurrentWidget(self.settings_page)
 
     def show_mock(self):
         self.mock.show()
@@ -204,11 +268,13 @@ class MainWindow(QMainWindow):
             self.source.configure(region=region, file_image=image, native=native)
             self.settings()
             self.worker.launch()
+            self.tabs.setCurrentWidget(self.play_page)
         except (ValueError, RuntimeError) as exc:
             self.error(exc)
 
     def stop_capture(self):
         self.worker.stop()
+        self.manual_mode = False
         self.invalidate("중지됨 / 갱신 필요")
         # Never wait synchronously on the UI thread. Restart is available after finish.
 
@@ -250,6 +316,7 @@ class MainWindow(QMainWindow):
         try:
             self.settings(self.read_manual())
             self.worker.launch()
+            self.tabs.setCurrentWidget(self.play_page)
         except ValueError as exc:
             self.error(exc)
 
@@ -296,9 +363,11 @@ class MainWindow(QMainWindow):
         self.last_state = observation.state
         self.last_seen = time.monotonic()
         if observation.state is None:
+            self.recognition_errors = observation.errors
             self.invalidate("인식 실패 / 갱신 필요")
             self.confidence_label.setText("; ".join(observation.errors))
         else:
+            self.recognition_errors = []
             s = observation.state
             if self.result_state != s:
                 self.invalidate("새 화면 안정화 / 갱신 필요")
@@ -309,9 +378,8 @@ class MainWindow(QMainWindow):
         if self.worker.stop_event.is_set():
             return
         self.status_label.setText(text)
-        if "갱신 필요" in text:
-            self.result_state = None
-            self.output.clear()
+        if "갱신 필요" in text or '안정화' in text:
+            self.invalidate(text)
 
     def on_analyzed(self, s, result, revision, source_revision):
         if (self.worker.stop_event.is_set() or revision != self.accepted_revision
@@ -326,7 +394,7 @@ class MainWindow(QMainWindow):
                  f"예상 팟 지분 {result.equity:.2%} (무승부 분배 포함)",
                  f"MC 표준오차 {result.standard_error:.2%} · {result.samples}회 · 범위 {self.ranges.text()}",
                  f"팟 오즈 / 콜 손익분기 지분 {pot_odds(s.pot, s.to_call):.2%}",
-                 f"추가 베팅 없는 쇼다운 가정 콜 EV {call_ev(result.equity, s.pot, s.to_call):+.2f}",
+                 f"추가 베팅 없는 쇼다운 가정 {'콜' if s.to_call else '체크'} EV {call_ev(result.equity, s.pot, s.to_call):+.2f}",
                  "폴드 EV 0 (현재 결정 이후, 이전 투자 제외)",
                  ("콜 금액 0 → 체크 가능。" if not s.to_call else "콜 또는 폴드 여부 검토 필요. ") + "상대 모델 부재로 행동 확정 추천 보류."]
         if s.to_call:
@@ -340,12 +408,17 @@ class MainWindow(QMainWindow):
         if self.is_live() and not self.manual_mode:
             lines.append('상대 수·포지션: 보정 시 수동 가정. 스택도 영역 미지정이면 수동 가정. 실제 값이 바뀌면 다시 보정하세요.')
         self.output.setPlainText("\n".join(lines))
+        source = '수동 입력' if self.manual_mode else ('실제 화면' if self.is_live() else '모의 화면')
+        self.dashboard.show_result(s,result,source,self.ranges.text(),self.is_live() and not self.manual_mode)
         self.status_label.setText("수동 입력 분석 완료" if self.manual_mode else "분석 갱신 완료")
 
     def check_stale(self):
         threshold = max(2.0, self.interval.value()/1000 * 3)
         if not self.manual_mode and self.last_seen and time.monotonic() - self.last_seen > threshold:
             self.invalidate("갱신 필요 (최신 화면 없음)")
+        elif self.result_state is not None and not self.manual_mode:
+            age=max(0,round(time.monotonic()-self.last_seen))
+            self.dashboard.freshness.setText('방금 갱신' if age==0 else f'{age}초 전 확인')
 
     def is_live(self):
         return self.mode.currentIndex() == 1
@@ -425,10 +498,15 @@ class MainWindow(QMainWindow):
             self.pass_timer.stop()
 
     def error(self, exc):
+        self.invalidate(str(exc))
+        if 'Tesseract' in str(exc):
+            self.dashboard.message('Tesseract 설치를 확인하세요',str(exc),'caution','설정 필요')
         QMessageBox.warning(self, "입력 / 실행 오류", str(exc))
 
     def closeEvent(self, event):
         self.closing = True
+        self.stale_timer.stop()
+        self.pass_timer.stop()
         if self.reference is not None and self.reference.isRunning():
             self.reference.finished.connect(self.close, Qt.ConnectionType.SingleShotConnection)
             event.ignore()
