@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "holdem-vision-analyzer"
-version = "0.5.1"
-description = "Calibrated screen and mock Texas Hold'em vision desktop lab"
+version = "0.6.0"
+description = "Local vision model and pixel-based Texas Hold'em desktop analyzer"
 requires-python = ">=3.12,<3.13"
 dynamic = ["dependencies"]
 

@@ -14,13 +14,16 @@ class Stabilizer:
     def reset(self):
         self.candidate = None
         self.count = 0
+        self.key = None
 
-    def update(self, state: GameState | None):
+    def update(self, state: GameState | None, key=None):
         if state is None:
             self.reset()
             return None
-        if state == self.candidate:
+        current_key=state if key is None else key
+        if current_key == self.key:
             self.count += 1
         else:
-            self.candidate, self.count = state, 1
+            self.count = 1
+        self.candidate,self.key=state,current_key
         return state if self.count >= self.frames else None

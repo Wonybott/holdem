@@ -12,6 +12,7 @@ from src.capture.sources import MockSource, Region, WindowsMockCapture, load_ima
 from src.capture.worker import AnalysisWorker
 from src.capture.desktop import DesktopRegionCapture, ReferenceCapture, AutomaticMonitorCapture
 from src.vision.pokernow import PokerNowRecognizer
+from src.vision.local_ai import LocalAIRecognizer,DEFAULT_MODEL
 from src.vision.screen import ScreenProfile, ScreenRecognizer
 from src.gui.calibration import CalibrationDialog
 from src.gui.mock_window import MockWindow
@@ -25,7 +26,7 @@ from src.strategy.scenarios import pot_odds, call_ev, bet_scenarios
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Texas Hold'em Vision Analyzer · 0.5.1")
+        self.setWindowTitle("Texas Hold'em Vision Analyzer · 0.6.0")
         self.resize(940, 940)
         self.setMinimumSize(720, 650)
         self.source = MockSource()
@@ -36,6 +37,7 @@ class MainWindow(QMainWindow):
         self.worker.analyzed.connect(self.on_analyzed)
         self.worker.status.connect(self.on_status)
         self.last_seen = 0
+        self.result_capture_time=None
         self.last_state = None
         self.last_cards = None
         self.result_state = None
@@ -65,7 +67,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(header)
         controls = QHBoxLayout()
         self.mode = QComboBox()
-        self.mode.addItems(['자체 모의 화면', 'PokerNow 자동 인식 (보정 없음)', '직접 보정 (고급)'])
+        self.mode.addItems(['자체 모의 화면', 'PokerNow 자동 인식 (보정 없음)', '직접 보정 (고급)', '로컬 AI 인식 (Ollama)'])
         self.mode.currentIndexChanged.connect(lambda _: self.stop_capture())
         controls.addWidget(self.mode, 1)
         self.start_button = self.button(controls, '분석 시작 / 재개', self.start_capture)
@@ -87,6 +89,18 @@ class MainWindow(QMainWindow):
         settings_layout.setSpacing(16)
         hint = QLabel('자동 모드는 모니터 번호만 확인하고 위의 분석 시작을 누르세요. 직접 보정은 고급 모드에서만 사용합니다.')
         hint.setWordWrap(True); settings_layout.addWidget(hint)
+        local_group=QGroupBox('로컬 AI 인식 · 권장')
+        local_form=QFormLayout(local_group)
+        info=QLabel('사진 전체를 이해하는 시각 모델을 내 PC에서 실행합니다. 외부 이미지 전송·API 키·Tesseract가 필요 없습니다.\n먼저 Ollama 설치 후 PowerShell에서 ollama pull qwen2.5vl:7b 를 실행하세요. 초기 모델 다운로드에는 인터넷이 필요합니다.')
+        info.setWordWrap(True);local_form.addRow(info)
+        self.local_model=QLineEdit(DEFAULT_MODEL);local_form.addRow('Ollama 시각 모델',self.local_model)
+        self.local_interval=QSpinBox();self.local_interval.setRange(5,60);self.local_interval.setValue(5);self.local_interval.setSuffix(' 초')
+        local_form.addRow('최소 화면 판독 간격',self.local_interval)
+        local_hint=QLabel('권장 순서: 저장한 실제 사진부터 읽기 → 결과 대조 → 화면 분석. 모델 판독은 수 초~수십 초 이상 걸릴 수 있으며 PC 성능에 따라 달라집니다. 잘못 읽을 수 있으므로 카드·금액을 대조하세요.')
+        local_hint.setWordWrap(True);local_form.addRow(local_hint)
+        self.button(local_form,'로컬 AI로 실제 사진 읽기',self.open_local_image)
+        self.button(local_form,'로컬 AI로 내 화면 분석 시작',self.start_local)
+        settings_layout.addWidget(local_group)
         screen_group = QGroupBox('1. 화면 입력')
         screen_layout = QVBoxLayout(screen_group)
         auto_hint=QLabel('자동 모드: PokerNow 창을 크게 띄우고 상단에서 분석 시작을 누르세요. 카드 정답·영역 등록이 필요 없습니다.')
@@ -218,6 +232,8 @@ class MainWindow(QMainWindow):
             self.dashboard.message('먼저 화면을 설정하세요',
                                    '화면 설정에서 저장된 보정을 불러오거나, 실제 테이블의 카드·팟·콜 영역을 지정하세요.',
                                    'caution','설정 필요')
+        elif self.is_local() and ('Ollama' in message or '로컬 AI' in message):
+            self.dashboard.message('로컬 AI 화면 판독',message,'caution','로컬 모델')
         elif 'Tesseract' in message:
             self.dashboard.message('Tesseract 설치를 확인하세요',message,'caution','설정 필요')
         elif '중지' in message:
@@ -235,7 +251,10 @@ class MainWindow(QMainWindow):
             self.next_step = 'start'; self.dashboard.next_button.setText('분석 다시 시작')
         elif '인식 실패' in message:
             errors='; '.join(self.recognition_errors)
-            if self.is_auto():
+            if self.is_local():
+                self.dashboard.message('로컬 AI 판독을 확인하세요',errors or 'Ollama 실행과 로컬 모델 설치를 확인하세요.','caution','로컬 판독 보류')
+                self.dashboard.next_button.setText('로컬 모델 설정 열기')
+            elif self.is_auto():
                 self.dashboard.message('자동 인식을 확인하세요',errors or 'PokerNow 창을 크게 띄우고 카드·숫자·행동 버튼이 가려지지 않게 해 주세요.','caution','인식 실패')
                 self.dashboard.next_button.setText('모니터·자동 인식 확인')
             elif self.is_live() and 'OCR' in errors:
@@ -285,9 +304,10 @@ class MainWindow(QMainWindow):
     def settings(self, manual=None):
         recognizer=None
         if manual is None:
-            if self.is_auto():recognizer=PokerNowRecognizer(hero_name=self.hero_name.text())
+            if self.is_local():recognizer=LocalAIRecognizer(self.local_model.text().strip(),hero_name=self.hero_name.text().strip())
+            elif self.is_auto():recognizer=PokerNowRecognizer(hero_name=self.hero_name.text())
             elif self.is_live() and self.profile is not None:recognizer=ScreenRecognizer(self.profile)
-        self.accepted_revision = self.worker.configure(self.interval.value(),self.iterations.value(),
+        self.accepted_revision = self.worker.configure(self.local_interval.value()*1000 if self.is_local() else self.interval.value(),self.iterations.value(),
                                                        self.ranges.text(),manual,recognizer)
         self.manual_mode=manual is not None
         self.last_cards=None
@@ -439,7 +459,7 @@ class MainWindow(QMainWindow):
             if self.result_state != s:
                 self.invalidate("새 화면 안정화 / 갱신 필요")
             fields = " · ".join(f"{k} {v:.0%}" for k, v in observation.confidence.items())
-            self.confidence_label.setText(f"템플릿 일치도 (통계적 확률 아님): {fields}")
+            self.confidence_label.setText('로컬 시각 모델의 판독값입니다. 확률 보증이 아니며 실제 화면과 대조하세요.' if self.is_local() else f"템플릿 일치도 (통계적 확률 아님): {fields}")
 
     def on_status(self, text):
         if self.worker.stop_event.is_set():
@@ -448,6 +468,9 @@ class MainWindow(QMainWindow):
             self.last_cards=None
             self.last_table=None;self.seat_view.set_snapshot(None)
         self.status_label.setText(text)
+        if self.is_local() and text.startswith('로컬 AI가') and self.result_state is None:
+            self.dashboard.message('로컬 AI가 화면을 읽고 있습니다',
+                                   'Ollama에서 처리 중입니다. 첫 모델 로딩과 CPU 판독은 오래 걸릴 수 있습니다. 중지 버튼으로 취소할 수 있습니다.',badge='로컬 판독 중')
         if "갱신 필요" in text or '안정화' in text:
             self.invalidate(text)
 
@@ -456,6 +479,7 @@ class MainWindow(QMainWindow):
                 or source_revision != self.source.snapshot()[-1]):
             return
         self.result_state = s
+        self.result_capture_time=getattr(self.worker.recognizer,'completed_capture_time',None) if self.is_local() else None
         self.last_seen = time.monotonic()
         call_text=f'{s.to_call:g}' if s.to_call is not None else '확인 필요'
         lines = [f"{'수동 입력' if self.manual_mode else ('자동 화면' if self.is_auto() else '모의/보정 화면')} · {s.street} · 위치 {s.position} · 상대 {s.opponents}",
@@ -481,23 +505,50 @@ class MainWindow(QMainWindow):
         if s.settled_pot is not None:lines.append(f'중앙 팟 {s.settled_pot:g} / 총 팟 {s.pot:g}')
         lines.extend(f'{a.player} · {a.street} · {a.action} · {a.amount:g}' for a in s.history[-12:])
         self.output.setPlainText("\n".join(lines))
-        source = '수동 입력' if self.manual_mode else ('자동 인식' if self.is_auto() else ('직접 보정' if self.is_live() else '모의 화면'))
+        source = '수동 입력' if self.manual_mode else ('로컬 AI' if self.is_local() else ('자동 인식' if self.is_auto() else ('직접 보정' if self.is_live() else '모의 화면')))
         self.dashboard.show_result(s,result,source,self.ranges.text(),self.is_live() and not self.is_auto() and not self.manual_mode)
         self.mini.show_result(s,result)
+        if self.is_local():
+            age=max(0,round(time.monotonic()-(self.result_capture_time or self.last_seen)))
+            self.dashboard.freshness.setText(f'로컬 AI · {age}초 전 캡처 기준')
+            self.dashboard.context.setText(self.dashboard.context.text()+' · 캡처 시점의 판독값')
+            self.mini.metrics.setText(self.mini.metrics.text()+f'\n{age}초 전 캡처 기준')
+            if s.hero_turn is None:
+                self.dashboard.message('캡처 시점의 분석입니다','판독 중 화면이 바뀌었거나 내 차례가 불명확해 현재 행동·금액 판단을 보류합니다.',badge='로컬 AI 스냅샷')
         self.status_label.setText("수동 입력 분석 완료" if self.manual_mode else "분석 갱신 완료")
 
     def check_stale(self):
-        threshold = max(2.0, self.interval.value()/1000 * 3)
+        threshold = max(2.0, (self.local_interval.value() if self.is_local() else self.interval.value()/1000) * 3)
+        if self.is_local():threshold=max(threshold,getattr(self.worker.recognizer,'last_duration',0)*2+5)
         if not self.manual_mode and self.last_seen and time.monotonic() - self.last_seen > threshold:
             self.last_cards=None
             self.last_table=None;self.seat_view.set_snapshot(None)
             self.invalidate("갱신 필요 (최신 화면 없음)")
         elif self.result_state is not None and not self.manual_mode:
-            age=max(0,round(time.monotonic()-self.last_seen))
-            self.dashboard.freshness.setText('방금 갱신' if age==0 else f'{age}초 전 확인')
+            age=max(0,round(time.monotonic()-(self.result_capture_time or self.last_seen)))
+            self.dashboard.freshness.setText(f'로컬 AI · {age}초 전 캡처 기준' if self.is_local() else ('방금 갱신' if age==0 else f'{age}초 전 확인'))
+
+    def is_local(self):
+        return self.mode.currentIndex()==3
 
     def is_auto(self):
-        return self.mode.currentIndex()==1
+        return self.mode.currentIndex() in (1,3)
+
+    def start_local(self):
+        self.mode.setCurrentIndex(3)
+        self.start_capture()
+
+    def open_local_image(self):
+        path,_=QFileDialog.getOpenFileName(self,'로컬 AI로 읽을 실제 사진 선택','','Images (*.png *.jpg *.jpeg *.bmp)')
+        if path:
+            try:
+                self.stop_capture()
+                self.mode.setCurrentIndex(3)
+                self.source.configure(file_image=load_image(path),region=Region())
+                self.settings()
+                self.worker.launch()
+                self.tabs.setCurrentWidget(self.play_page)
+            except (ValueError,OSError) as exc:self.error(exc)
 
     def is_live(self):
         return self.mode.currentIndex()!=0

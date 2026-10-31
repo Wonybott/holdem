@@ -1,4 +1,5 @@
 import hashlib
+from dataclasses import replace
 import time
 from threading import Event, Lock
 from PySide6.QtCore import QThread, Signal
@@ -32,7 +33,7 @@ class AnalysisWorker(QThread):
         for text in texts:
             parse_range(text)
         with self.lock:
-            self.interval = max(.1, min(5.0, interval_ms / 1000))
+            self.interval = max(.1, min(60.0, interval_ms / 1000))
             self.iterations, self.range_text, self.manual = iterations, range_text, manual
             self.recognizer = recognizer if recognizer is not None else MockRecognizer()
             self.revision += 1
@@ -41,6 +42,7 @@ class AnalysisWorker(QThread):
     def stop(self):
         self.restart_requested = False
         self.stop_event.set()
+        if hasattr(self.recognizer,'cancel_pending'):self.recognizer.cancel_pending()
 
     def _restart(self):
         if self.restart_requested:
@@ -71,11 +73,13 @@ class AnalysisWorker(QThread):
                     frame_key = (hashlib.sha256(recognizer.signature(image) if hasattr(recognizer, 'signature') else image.tobytes()).digest(), source_revision, revision)
                     if frame_key != last_frame_key or getattr(recognizer,'always_analyze',False):
                         if hasattr(recognizer,'set_cancel'):recognizer.set_cancel(self.stop_event)
+                        if hasattr(recognizer,'model'):self.status.emit('로컬 AI가 화면 판독 중 · PC 안에서 처리')
                         cached = recognizer.analyze(image)
                         frame_key = (hashlib.sha256(recognizer.signature(image) if hasattr(recognizer,'signature') else image.tobytes()).digest(),source_revision,revision)
                         last_frame_key = frame_key
                     self.observed.emit(cached, source_revision)
-                    state = stable.update(cached.state)
+                    semantic=recognizer.state_key(cached.state) if hasattr(recognizer,'state_key') and cached.state is not None else None
+                    state = stable.update(cached.state,key=semantic)
                     if state is None:
                         last_key = None
                         if cached.table is not None and cached.table.phase in ('waiting','paused'):
@@ -106,6 +110,13 @@ class AnalysisWorker(QThread):
                             fresh_image, fresh_revision = self.source.grab()
                             current_frame = (hashlib.sha256(recognizer.signature(fresh_image) if hasattr(recognizer, 'signature') else fresh_image.tobytes()).digest(), fresh_revision, revision)
                         pixels_current = manual is not None or current_frame == frame_key
+                        # Slow local inference is an explicitly labelled snapshot.
+                        # If any pixels changed, never present its old call/action
+                        # as a current decision. Card/equity facts remain tied to
+                        # the capture time shown by the local-AI UI.
+                        if not pixels_current and getattr(recognizer,'snapshot_mode',False) and fresh_revision==source_revision:
+                            state=replace(state,to_call=None,hero_turn=None)
+                            pixels_current=True
                         if not pixels_current:
                             stable.reset()
                             last_frame_key = None

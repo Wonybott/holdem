@@ -10,6 +10,8 @@ def main():
     parser = argparse.ArgumentParser(description="픽셀 기반 Hold'em Analyzer")
     parser.add_argument("--analyze", metavar="IMAGE", help="GUI 없이 모의 이미지를 분석")
     parser.add_argument("--pokernow",action="store_true",help="--analyze 이미지를 보정 없이 PokerNow 자동 판독")
+    parser.add_argument("--local-ai",action="store_true",help="Ollama 로컬 시각 모델로 --analyze 이미지를 판독")
+    parser.add_argument("--model",default="qwen2.5vl:7b",help="로컬 Ollama 시각 모델 이름")
     parser.add_argument("--iterations", type=int, default=3000)
     parser.add_argument("--range", default="random", dest="range_text")
     args = parser.parse_args()
@@ -22,7 +24,8 @@ def main():
         from src.strategy.scenarios import pot_odds, call_ev
         try:
             from src.vision.pokernow import PokerNowRecognizer
-            recognizer=PokerNowRecognizer() if args.pokernow else MockRecognizer()
+            from src.vision.local_ai import LocalAIRecognizer
+            recognizer=LocalAIRecognizer(args.model) if args.local_ai else (PokerNowRecognizer() if args.pokernow else MockRecognizer())
             observation = recognizer.analyze(load_image(args.analyze))
             if observation.state is None:
                 print(json.dumps({"errors": observation.errors,"cards":asdict(observation.cards) if observation.cards else None}, ensure_ascii=False))
@@ -43,7 +46,7 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Holdem Vision Analyzer")
     window = MainWindow()
-    if sys.platform=='win32':window.mode.setCurrentIndex(1)
+    if sys.platform=='win32':window.mode.setCurrentIndex(3)
     window.show()
     return app.exec()
 
