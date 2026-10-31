@@ -137,3 +137,29 @@ def test_lobby_and_paused_scenes_show_seats_without_action(app):
         assert window.mini.title.text()=='게임 일시정지'
         assert window.dashboard.ev.value.text()=='—'
     finally:window.close()
+
+
+def test_partial_cards_stay_visible_while_advice_waits_and_clear_on_next_failure(app):
+    from src.vision.recognizer import CardReading
+    window=MainWindow()
+    try:
+        window.mode.setCurrentIndex(1)
+        window.worker.stop_event.clear()
+        partial=Observation(cards=CardReading(('6d','Kd'),()),errors=['팟 OCR 확인 필요'])
+        window.on_observed(partial,window.source.revision)
+        window.on_status('인식 실패 / 갱신 필요')
+        assert window.dashboard.hero.cards[0].text()=='6♦'
+        assert window.dashboard.hero.cards[1].text()=='K♦'
+        assert '6♦ K♦' in window.mini.cards.text()
+        assert window.dashboard.equity.value.text()=='—'
+        assert window.result_state is None
+        assert not window.dashboard.amount.text()
+        assert '팟 OCR' in window.dashboard.instruction.text()
+        window.on_observed(Observation(errors=['카드 가려짐']),window.source.revision)
+        assert window.dashboard.hero.cards[0].text()=='—'
+        assert not window.mini.cards.text()
+        window.on_observed(partial,window.source.revision)
+        window.stop_capture()
+        assert window.dashboard.hero.cards[0].text()=='—'
+        assert not window.mini.cards.text()
+    finally:window.close()

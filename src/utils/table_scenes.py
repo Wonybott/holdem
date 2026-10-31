@@ -7,12 +7,12 @@ from src.utils.pokernow_fixture import font,card
 SLOTS=((.70,1.02),(.30,1.02),(-.02,.82),(-.12,.48),(-.02,.12),(.30,-.10),(.70,-.10),(1.02,.12),(1.12,.48),(1.02,.82))
 
 
-def scene(hero=0,occupied=(0,8),bets=None,waiting=False,paused=False,gray=False,full_browser=False,board=('4d','6s','Ah'),hole=('7h','4c')):
+def scene(hero=0,occupied=(0,8),bets=None,waiting=False,paused=False,gray=False,full_browser=False,board=('4d','6s','Ah'),hole=('7h','4c'),tournament=False):
     bets=bets or {}
     im=Image.new('RGB',(1920,1080),(38,38,38));d=ImageDraw.Draw(im)
     tx,ty,tw,th=340,220,1240,580
     d.ellipse((tx,ty,tx+tw,ty+th),fill=(83,20,115),outline=(16,16,16),width=14)
-    main=0 if waiting else 4000;total=main+sum(bets.values())
+    main=0 if waiting or tournament else 4000;total=main+sum(bets.values())
     d.text((900,255),str(main),font=font('text',42),fill='white',anchor='lt')
     if bets:d.text((960,228),'total '+str(total),font=font('text',21),fill='white',anchor='lt')
     for i,(sx,sy) in enumerate(SLOTS):
@@ -26,16 +26,18 @@ def scene(hero=0,occupied=(0,8),bets=None,waiting=False,paused=False,gray=False,
     for i in occupied:
         sx,sy=SLOTS[i];x=round(tx+sx*tw);y=round(ty+sy*th)
         d=ImageDraw.Draw(im)
-        actor=i==hero and not paused and not waiting
+        actor=(i==7 if tournament else i==hero) and not paused and not waiting
         d.rounded_rectangle((x-105,y-42,x+105,y+42),radius=9,fill='white' if actor else (52,52,52))
         name='wonybot' if i==hero else f'player{i+1}'
         color='black' if actor else 'white'
         d.text((x-82,y-27),name,font=font('text',23),fill=color,anchor='lt')
-        d.text((x-82,y+3),str(48000 if i==hero else 44000+i*1000),font=font('text',26),fill=color,anchor='lt')
+        d.text((x-82,y+3),str((1000-bets.get(i,0)) if tournament else (48000 if i==hero else 44000+i*1000)),font=font('text',26),fill=color,anchor='lt')
         if not waiting:
             # Hole cards sit toward the felt, whatever the player's actual seat.
             hx=round(x+(-185 if sx>.8 else (110 if sx<.2 else 0)))
             hy=round(y+(105 if sy<.3 else (-105 if sy>.8 else 0)))
+            if tournament:hx=x-175;hy=y
+
             for j,angle in enumerate((6,-6)):
                 if i==hero:c=card(hole[j],(78,108),angle)
                 else:
@@ -44,6 +46,10 @@ def scene(hero=0,occupied=(0,8),bets=None,waiting=False,paused=False,gray=False,
                     c=c.rotate(angle,expand=True,resample=Image.Resampling.BICUBIC)
                 im.paste(c,(hx-75+j*66,hy-55),c)
         d=ImageDraw.Draw(im)
+        if tournament:
+            # Bright trophy counters are deliberately not stacks or bets.
+            d.rounded_rectangle((x+50,y-61,x+110,y-30),radius=15,fill=(130,245,70))
+            d.text((x+58,y-55),str(6867-i*513),font=font('text',15),fill=(40,90,25),anchor='lt')
         if i in bets:
             bx=round(tx+(.5+(sx-.5)*.68)*tw);by=round(ty+(.5+(sy-.5)*.68)*th)
             d.rounded_rectangle((bx-43,by-19,bx+43,by+19),radius=18,fill=(210,255,90))
@@ -56,15 +62,16 @@ def scene(hero=0,occupied=(0,8),bets=None,waiting=False,paused=False,gray=False,
         sx,sy=SLOTS[hero];cx=round(tx+(.5+(sx-.5)*.68)*tw);cy=round(ty+(.5+(sy-.5)*.68)*th)
         if sy>.8:cy-=105
         elif sy<.3:cx=round(x+(130 if sx<.5 else -130));cy=round(y+125)
-        d.rounded_rectangle((cx-40,cy-17,cx+40,cy+17),radius=16,fill='white')
-        d.text((cx-29,cy-11),'check',font=font('text',22),fill='black',anchor='lt')
+        if not tournament:
+            d.rounded_rectangle((cx-40,cy-17,cx+40,cy+17),radius=16,fill='white')
+            d.text((cx-29,cy-11),'check',font=font('text',22),fill='black',anchor='lt')
         if paused:
             d.text((680,620),'The room owner paused the game.',font=font('text',26),fill=(190,170,200),anchor='lt')
             d.text((1570,620),'OFFLINE',font=font('text',21),fill='white',anchor='lt')
-        else:
+        elif not tournament:
             d.text((1590,935),'YOUR TURN',font=font('text',24),fill=(235,255,80),anchor='lt')
         for text,x in ((f'CALL {max(bets.values())}' if bets else 'BET',1160),('RAISE' if bets else 'CHECK',1430),('FOLD',1690)):
-            d.text((x,985),text,font=font('text',27),fill=(25,60,35) if paused else (40,205,115),anchor='lt')
+            d.text((x,985),text,font=font('text',27),fill=(25,60,35) if paused or tournament else (40,205,115),anchor='lt')
         if bets:d.text((1560,985),'CHECK',font=font('text',27),fill=(25,55,35),anchor='lt')
     if full_browser:
         outside=Image.new('RGB',(3839,1599),(24,24,24));bd=ImageDraw.Draw(outside)

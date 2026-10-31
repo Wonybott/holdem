@@ -25,7 +25,7 @@ def main():
             recognizer=PokerNowRecognizer() if args.pokernow else MockRecognizer()
             observation = recognizer.analyze(load_image(args.analyze))
             if observation.state is None:
-                print(json.dumps({"errors": observation.errors}, ensure_ascii=False))
+                print(json.dumps({"errors": observation.errors,"cards":asdict(observation.cards) if observation.cards else None}, ensure_ascii=False))
                 return 2
             state = observation.state
             equity = estimate(state, [parse_range(args.range_text)] * state.opponents,

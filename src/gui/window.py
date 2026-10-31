@@ -25,7 +25,7 @@ from src.strategy.scenarios import pot_odds, call_ev, bet_scenarios
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Texas Hold'em Vision Analyzer · 0.5.0")
+        self.setWindowTitle("Texas Hold'em Vision Analyzer · 0.5.1")
         self.resize(940, 940)
         self.setMinimumSize(720, 650)
         self.source = MockSource()
@@ -37,6 +37,7 @@ class MainWindow(QMainWindow):
         self.worker.status.connect(self.on_status)
         self.last_seen = 0
         self.last_state = None
+        self.last_cards = None
         self.result_state = None
         self.manual_mode = False
         self.accepted_revision = 0
@@ -252,6 +253,11 @@ class MainWindow(QMainWindow):
         else:
             self.dashboard.message('확인이 필요합니다',message,'caution')
         self.mini.clear(self.dashboard.title.text(),self.dashboard.instruction.text())
+        if self.last_cards is not None and '중지' not in message and '최신 화면 없음' not in message:
+            self.dashboard.hero.set_cards(self.last_cards.hole)
+            self.dashboard.board.set_cards(self.last_cards.board)
+            self.dashboard.context.setText('카드 판독 완료 · 전체 분석 대기 (금액·좌석 확인 필요)')
+            self.mini.show_cards(self.last_cards.hole,self.last_cards.board)
         if self.last_table is not None and self.last_table.phase=='waiting':
             seats=self.last_table.seats
             self.mini.cards.setText(f'확인된 플레이어 {sum(s.occupied is True for s in seats)}명 / 빈 자리 {sum(s.occupied is False for s in seats)}개')
@@ -284,6 +290,7 @@ class MainWindow(QMainWindow):
         self.accepted_revision = self.worker.configure(self.interval.value(),self.iterations.value(),
                                                        self.ranges.text(),manual,recognizer)
         self.manual_mode=manual is not None
+        self.last_cards=None
         self.last_table=None;self.seat_view.set_snapshot(None)
         self.last_seen=0
         self.invalidate('계산 준비 / 갱신 필요')
@@ -322,6 +329,7 @@ class MainWindow(QMainWindow):
 
     def stop_capture(self):
         self.worker.stop()
+        self.last_cards=None
         self.last_table=None
         self.seat_view.set_snapshot(None)
         self.dashboard.seat_hint.clear()
@@ -412,6 +420,7 @@ class MainWindow(QMainWindow):
         if self.worker.stop_event.is_set() or self.manual_mode or source_revision != self.source.snapshot()[-1]:
             return
         self.last_state = observation.state
+        self.last_cards = observation.cards
         self.last_table=observation.table
         self.seat_view.set_snapshot(observation.table)
         if observation.table is not None:
@@ -436,6 +445,7 @@ class MainWindow(QMainWindow):
         if self.worker.stop_event.is_set():
             return
         if text.startswith('갱신 필요:'):
+            self.last_cards=None
             self.last_table=None;self.seat_view.set_snapshot(None)
         self.status_label.setText(text)
         if "갱신 필요" in text or '안정화' in text:
@@ -479,6 +489,7 @@ class MainWindow(QMainWindow):
     def check_stale(self):
         threshold = max(2.0, self.interval.value()/1000 * 3)
         if not self.manual_mode and self.last_seen and time.monotonic() - self.last_seen > threshold:
+            self.last_cards=None
             self.last_table=None;self.seat_view.set_snapshot(None)
             self.invalidate("갱신 필요 (최신 화면 없음)")
         elif self.result_state is not None and not self.manual_mode:

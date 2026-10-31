@@ -13,7 +13,7 @@ from src.models.state import GameState
 from src.models.table import Seat,TableSnapshot
 from src.vision.seats import TableTracker,empty_rectangles,betting_pills,relative,ring_radius,polar,angle_distance,seat_position
 from src.vision.ocr import Box,Word,TesseractReader
-from src.vision.recognizer import Observation
+from src.vision.recognizer import Observation,CardReading
 from src.vision.screen import TesseractNumbers
 from src.vision.suit_templates import MASKS
 
@@ -203,6 +203,13 @@ def back_boxes(image,table):
         if len(polygon)!=4:continue
         x,y,w,h=cv2.boundingRect(polygon)
         if not (.10*table.h<h<.35*table.h and .45<w/h<.95):continue
+        outline=np.zeros((h,w),np.uint8)
+        local=polygon-np.array([[[x,y]]])
+        cv2.polylines(outline,[local],True,255,3)
+        tile_hsv=hsv[y:y+h,x:x+w]
+        neutral=(tile_hsv[:,:,1]<65)&(tile_hsv[:,:,2]>125)
+        gold_edge=(tile_hsv[:,:,0]>=8)&(tile_hsv[:,:,0]<=38)&(tile_hsv[:,:,1]>90)&(tile_hsv[:,:,2]>65)
+        if float(neutral[outline>0].mean())<.30 and float(gold_edge[outline>0].mean())<.40:continue
         box=Box(x,y,w,h)
         rx,ry=relative(box,table)
         if not .72<ring_radius(rx,ry)<1.6:continue
@@ -210,6 +217,26 @@ def back_boxes(image,table):
         if float(np.median(cv2.cvtColor(tile,cv2.COLOR_BGR2HSV)[:,:,2]))>125:continue
         if not any(hypot(b.cx-box.cx,b.cy-box.cy)<h*.3 for b in boxes):boxes.append(box)
     return boxes
+
+
+def card_owner(group, players, table):
+    """Use the gap to a name/stack panel, not a rank glyph's centre.
+
+    A tilted pair can be above or to the left of its panel. In crowded
+    tables the rank centre may be closer to a different player's centre.
+    """
+    candidates=[]
+    for seat,stack,_ in players:
+        panel=Box(stack.x,round(stack.y-stack.h*1.7),stack.w,round(stack.h*2.7))
+        dx=max(panel.x-group.x-group.w,group.x-panel.x-panel.w,0)/table.w
+        dy=max(panel.y-group.y-group.h,group.y-panel.y-panel.h,0)/table.h
+        gap=hypot(dx,dy)
+        centre=hypot((group.cx-panel.cx)/table.w,(group.cy-panel.cy)/table.h)
+        candidates.append((gap+.08*centre,centre,seat.slot_id))
+    candidates.sort()
+    if not candidates or candidates[0][0]>.18 or candidates[0][1]>.42:return None
+    if len(candidates)>1 and candidates[1][0]-candidates[0][0]<.018:return None
+    return candidates[0][2]
 
 
 def nickname_line(image,box):
@@ -365,6 +392,7 @@ class PokerNowRecognizer:
             if same is None:rows.append([b])
             else:same.append(b)
         result=[]
+        self.pot_row_boxes=[]
         for row in rows:
             row.sort(key=lambda b:b.x)
             groups=[]
@@ -373,6 +401,7 @@ class PokerNowRecognizer:
                 else:groups[-1].append(b)
             for group in groups:
                 x=min(b.x for b in group);y=min(b.y for b in group);right=max(b.x+b.w for b in group);bottom=max(b.y+b.h for b in group)
+                self.pot_row_boxes.append(Box(x,y,right-x,bottom-y))
                 box=Box(max(0,x-10),max(0,y-10),right-x+20,bottom-y+20);crop=box.crop(image)
                 key=('potrow',crop.shape,hashlib.sha256(crop.tobytes()).digest())
                 if key not in self.context_cache:self.context_cache[key]=self.reader.words(crop,7)
@@ -410,11 +439,25 @@ class PokerNowRecognizer:
               and table.y-.10*table.h<w.box.cy<table.y+.31*table.h]
         groups=[g for g,_ in card_groups(image,table)]
         numeric=[w for w in area if number(w.text) is not None and w.confidence>=.85 and not any(g.contains(w.box) for g in groups)]
+        # A lone preflop pot '0' is frequently emitted as 'O' or omitted by
+        # English OCR. Independently read detected bright digit rows using the
+        # numeric two-view reader; never substitute a missing pot with zero.
+        for box in getattr(self,'pot_row_boxes',[]):
+            if not (table.y+.035*table.h<box.cy<table.y+.31*table.h):continue
+            if any(g.contains(box) for g in groups):continue
+            if any(abs(w.box.cx-box.cx)<box.h and abs(w.box.cy-box.cy)<box.h*.5 for w in numeric):continue
+            value,score=self.amount(image,box)
+            if value is not None and score>=.85:
+                numeric.append(Word(format(value,'g'),score,box))
         primary_options=[]
         for w in numeric:
             if w.box.cy<table.y+.035*table.h:continue
-            patch=Box(w.box.x-5,w.box.y-4,w.box.w+10,w.box.h+8).crop(image)
-            if np.median(cv2.cvtColor(patch,cv2.COLOR_BGR2HSV)[:,:,2])>180:continue
+            pad=max(8,round(w.box.h*.7))
+            patch=Box(w.box.x-pad,w.box.y-pad,w.box.w+2*pad,w.box.h+2*pad).crop(image)
+            value=cv2.cvtColor(patch,cv2.COLOR_BGR2HSV)[:,:,2]
+            # Test surrounding background, not a tightly cropped white '0'.
+            border=np.concatenate((value[:3].ravel(),value[-3:].ravel(),value[:,:3].ravel(),value[:,-3:].ravel()))
+            if np.median(border)>180:continue
             primary_options.append(w)
         if not primary_options:raise ValueError('팟 숫자를 확정하지 못했습니다.')
         primary=max(primary_options,key=lambda w:w.box.h)
@@ -498,7 +541,7 @@ class PokerNowRecognizer:
             n=None if any(box.contains(b) for _,b,_ in players) else self.slot_number(image,box)
             slots.append(Seat(f'empty{len(slots)}',x,y,number=n,occupied=False if n is not None else None))
         for seat,_,_ in players:
-            matches=sorted((hypot(seat.x-s.x,seat.y-s.y),i) for i,s in enumerate(slots))
+            matches=sorted((hypot(seat.x-s.x,seat.y-s.y),i) for i,s in enumerate(slots) if s.occupied is not True)
             if matches and matches[0][0]<.22:
                 i=matches[0][1];slots[i]=replace(seat,slot_id=slots[i].slot_id,number=slots[i].number)
             else:slots.append(seat)
@@ -506,10 +549,9 @@ class PokerNowRecognizer:
         counts={n:sum(s.number==n for s in slots) for n in {s.number for s in slots if s.number is not None}}
         slots=[replace(s,number=None) if s.number is not None and counts[s.number]>1 else s for s in slots]
         occupied=[s for s in slots if s.occupied is True]
-        def assign(box):
-            x,y=relative(box,table)
-            d=sorted((hypot(s.x-x,s.y-y),s.slot_id) for s in occupied)
-            return d[0][1] if d and d[0][0]<.30 and (len(d)==1 or d[1][0]-d[0][0]>.025) else None
+        # Rebind panel boxes to the unique slot IDs before card association.
+        panel_players=[(next(s for s in occupied if hypot(s.x-p.x,s.y-p.y)<.001),b,c) for p,b,c in players]
+        def assign(box):return card_owner(box,panel_players,table)
         active=set();card_owners=[]
         self.unassigned_outer=0
         for box in list({c.group for c in faces})+back_boxes(image,table):
@@ -571,6 +613,14 @@ class PokerNowRecognizer:
             waiting_words=[w for w in words if w.text.lower()=='waiting' and ring_radius(*relative(w.box,table))<.9]
             waiting=any(any(t.text.lower() in ('others','for') and abs(t.box.cy-w.box.cy)<w.box.h*2 and abs(t.box.cx-w.box.cx)<table.w*.5 for t in words) for w in waiting_words)
             faces,unreadable=find_faces(image,table,self.reader) if not waiting else ([],[])
+            # Keep independently confirmed cards visible if a pot/seat later fails.
+            if not waiting and not self.hero_name:
+                try:
+                    preliminary,community=arrange_faces(faces,table)
+                    geometric=[g for g,_ in card_groups(image,table) if .6<g.w/g.h<1.15 and ring_radius(*relative(g,table))<.82 and g not in {c.group for c in preliminary}]
+                    if len(geometric)==len(community):
+                        result.cards=CardReading(tuple(c.card for c in preliminary),tuple(c.card for c in community))
+                except ValueError:pass
             try:settled,explicit_total,pot_conf,pot_boxes=self.pots(image,words,table,faces)
             except ValueError:
                 if not waiting:raise
@@ -594,11 +644,11 @@ class PokerNowRecognizer:
             hero,board=arrange_faces(faces,table,anchor)
             geometric=[g for g,_ in card_groups(image,table) if .6<g.w/g.h<1.15 and ring_radius(*relative(g,table))<.82 and g not in {c.group for c in hero}]
             if len(geometric)!=len(board):raise ValueError('공통 카드의 수와 판독 결과가 다릅니다.')
-            hx=sum(c.box.cx for c in hero)/2;hy=sum(c.box.cy for c in hero)/2
-            hero_xy=((hx-table.x)/table.w,(hy-table.y)/table.h)
-            candidates=sorted((hypot(s.x-hero_xy[0],s.y-hero_xy[1]),s.slot_id) for s in seats if s.occupied is True)
-            if not candidates or candidates[0][0]>.30 or (len(candidates)>1 and candidates[1][0]-candidates[0][0]<.025):raise ValueError('내 카드와 좌석 연결이 불확실합니다.')
-            hero_id=candidates[0][1]
+            result.cards=CardReading(tuple(c.card for c in hero),tuple(c.card for c in board))
+            panel_players=[(next(s for s in seats if s.occupied is True and hypot(s.x-p.x,s.y-p.y)<.001),b,c) for p,b,c in players]
+            owners={card_owner(c.group,panel_players,table) for c in hero}
+            if len(owners)!=1 or None in owners:raise ValueError('내 카드와 좌석 연결이 불확실합니다.')
+            hero_id=owners.pop()
             seats=tuple(replace(s,hero=s.slot_id==hero_id,in_hand=True if s.slot_id==hero_id else s.in_hand) for s in seats)
             street={0:'Preflop',3:'Flop',4:'Turn',5:'River'}[len(board)]
             seats,hero_id=self.tracker.update(seats,'paused' if paused else 'playing',hero_id,street,tuple(c.card for c in hero))

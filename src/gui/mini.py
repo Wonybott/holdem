@@ -32,8 +32,11 @@ class MiniWindow(QWidget):
     def show_result(self,state,result):
         decision=explain_decision(state,result)
         self.title.setText(decision.title);self.amount.setText(decision.amount)
-        suits={'s':'♠','h':'♥','d':'♦','c':'♣'}
-        pretty=lambda cards:' '.join(c[0]+suits[c[1]] for c in cards)
-        self.cards.setText('내 카드 '+pretty(state.hole)+'\n보드 '+(pretty(state.board) or '없음'))
+        self.show_cards(state.hole,state.board)
         self.metrics.setText(f'예상 팟 지분 {result.equity:.1%} · 팟 {state.pot:g}칩')
         self.help.setText(decision.assumption)
+
+    def show_cards(self,hole,board):
+        suits={'s':'♠','h':'♥','d':'♦','c':'♣'}
+        pretty=lambda cards:' '.join(c[0]+suits[c[1]] for c in cards)
+        self.cards.setText('내 카드 '+pretty(hole)+'\n보드 '+(pretty(board) or '없음'))

@@ -16,3 +16,6 @@
 - `full_browser_demo.png`: 3839×1599 전체 브라우저 형태, 왼쪽 내 자리와 3명 참가자, 상대 베팅 4000 / total 8000. `python -m src.main --analyze assets/full_browser_demo.png --pokernow`로 분석할 수 있습니다.
 - `full_browser_paused_demo.png`: 동일한 전체 화면에 일시정지 배너, 회색 카드 뒷면, OFFLINE 상대, As/5h/2s/5s와 8h/2d를 표시합니다.
 - `seats_dashboard_example.png`: `full_browser_demo.png`를 실제 인식기로 읽은 결과를 Qt offscreen에서 좌석·베팅 탭에 표시한 예시입니다. 읽히지 않은 번호와 미확인 값은 그대로 남깁니다.
+
+
+0.5.1의 `preflop_eight_player_demo.png`는 6d/Kd, 공통 카드 없음, 참가자 8명, 중앙 팟 0과 total 140, 밝은 배지 및 다른 사람 차례를 재현한 **자체 생성** 3839×1599 이미지입니다. `preflop_cards_dashboard.png`는 그 이미지를 실제 OCR 인식기로 읽고 Monte Carlo를 수행해 Qt offscreen에서 표시한 예시입니다. 사용자 원본 사진이나 실제 PokerNow 캡처가 아닙니다.

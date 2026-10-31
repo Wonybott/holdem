@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 import cv2
 import numpy as np
-from src.models.state import GameState
+from src.models.state import GameState,validate_cards
 from src.models.table import TableSnapshot
 from src.vision.mock import (WIDTH, HEIGHT, CARD_SLOTS, CARD_H, CARD_W, CARD_TEMPLATES,
                              FIELDS, CELL_H, CELL_W, CELLS, GLYPH_TEMPLATES, header)
@@ -13,12 +13,25 @@ class OptionalOCR(Protocol):
     def read(self, image: np.ndarray) -> tuple[str | None, float]: ...
 
 
+@dataclass(frozen=True)
+class CardReading:
+    """Confirmed pixels only; never sufficient input for equity/advice."""
+    hole: tuple[str,...]
+    board: tuple[str,...]
+
+    def __post_init__(self):
+        validate_cards(self.hole+self.board)
+        if len(self.hole)!=2 or len(self.board) not in (0,3,4,5):
+            raise ValueError('카드 판독의 장수가 올바르지 않습니다.')
+
+
 @dataclass
 class Observation:
     state: GameState | None = None
     confidence: dict[str, float] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
     table: TableSnapshot | None = None
+    cards: CardReading | None = None
 
 
 def similarity(a, b):

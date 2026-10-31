@@ -201,3 +201,20 @@ def test_stop_cancels_ocr_before_starting_subprocess(monkeypatch):
     monkeypatch.setattr(subprocess,'run',unexpected)
     from src.poker.equity import Cancelled
     with pytest.raises(Cancelled):Blocked().words(np.zeros((40,100,3),np.uint8))
+
+
+def test_confirmed_cards_survive_unreadable_pot_without_fake_state(automatic):
+    picture=make_scene(hole=('6d','Kd'),board=())
+    picture[230:305,890:1160]=(90,17,65)
+    observation=automatic.analyze(picture)
+    assert observation.state is None
+    assert observation.errors
+    assert observation.cards is not None
+    assert observation.cards.hole==('6d','Kd')
+    assert observation.cards.board==()
+
+
+def test_card_preview_rejects_duplicates():
+    from src.vision.recognizer import CardReading
+    with pytest.raises(ValueError,match='중복'):
+        CardReading(('6d','6d'),())

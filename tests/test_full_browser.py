@@ -63,3 +63,31 @@ def test_paused_browser_with_gray_deck_and_offline_player():
     assert observation.state.hole==('8h','2d')
     assert observation.state.board==('As','5h','2s','5s')
     assert any(s.offline and s.in_hand is True for s in observation.state.seats)
+
+
+def test_crowded_preflop_pair_is_owned_by_panel_not_rank_centre(reader):
+    picture=scene(occupied=(0,1,2,3,4,7,8,9),hole=('6d','Kd'),board=(),
+                  bets={4:90,3:20,2:20,1:10},full_browser=True)
+    observation=reader.analyze(picture)
+    assert observation.state is not None,observation.errors
+    assert observation.state.hole==('6d','Kd')
+    assert observation.state.opponents==7
+    assert observation.state.stacks[0]==48000
+    assert next(s for s in observation.state.seats if s.hero).name=='wonybot'
+
+
+def test_tournament_preflop_zero_pot_and_bright_badges(reader):
+    picture=scene(occupied=(0,1,2,3,4,7,8,9),hole=('6d','Kd'),board=(),
+                  bets={4:90,3:20,2:20,1:10},full_browser=True,tournament=True)
+    observation=reader.analyze(picture)
+    assert observation.cards is not None,observation.errors
+    assert observation.cards.hole==('6d','Kd')
+    assert observation.state is not None,observation.errors
+    assert observation.state.board==()
+    assert observation.state.settled_pot==0
+    assert observation.state.pot==140
+    assert observation.state.opponents==7
+    assert observation.state.stacks[0]==1000
+    assert all(s<=1000 for s in observation.state.stacks)
+    assert observation.state.hero_turn is False
+    assert observation.state.to_call is None  # Dim CALL 90 is not actionable.
